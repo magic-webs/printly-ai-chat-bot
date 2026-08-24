@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "prebuild": "npx convex codegen",
     "start": "next start",
     "lint": "eslint"
   },
