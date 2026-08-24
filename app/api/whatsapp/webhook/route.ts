@@ -248,17 +248,18 @@ async function processIncoming(body: any, origin: string) {
 
       // Send back via WhatsApp API
       try {
+        if (reply.type === "text") {
+          let textToSend: string = reply.text || "";
+
           // Parse Printly JSON responses and extract plain text for WhatsApp
           if (textToSend.trim().startsWith('{')) {
             try {
               const parsed = JSON.parse(textToSend);
 
               if (parsed.type === "message") {
-                // Plain conversational reply — just send the message text
                 textToSend = parsed.message || textToSend;
 
               } else if (parsed.type === "order") {
-                // Quotation request collected — summarise for WhatsApp
                 const o = parsed.data?.order || {};
                 const c = parsed.data?.customer || {};
                 textToSend =
@@ -271,15 +272,12 @@ async function processIncoming(body: any, origin: string) {
                   `Our team will be in touch shortly with a quotation. 🖨️`;
 
               } else if (parsed.type === "agent") {
-                // Handoff to human agent
                 textToSend = `🤝 ${parsed.message || "A consultant will be in touch shortly."}`;
 
               } else if (parsed.type === "support") {
-                // Complaint registered
                 textToSend = `🔴 ${parsed.message || "Our support team will assist you shortly."}`;
 
               } else if (parsed.type === "customer") {
-                // Existing order enquiry
                 textToSend = `📦 ${parsed.message || "Our team will assist with your order enquiry shortly."}`;
 
               } else if (parsed.type === "document_analysis") {
@@ -292,7 +290,6 @@ async function processIncoming(body: any, origin: string) {
                 textToSend = `*${parsed.title || "Details"}*\n\n${parsed.intro || ""}\n\n${fieldLines}\n\n${parsed.outro || ""}`;
 
               } else if (parsed.message) {
-                // Fallback: any JSON with a message field
                 textToSend = parsed.message;
               }
             } catch {
