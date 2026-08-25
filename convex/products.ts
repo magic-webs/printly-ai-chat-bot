@@ -312,7 +312,7 @@ export const getProductByName = internalQuery({
 // ---------------------------------------------------------------------------
 export const getProductDetails = internalAction({
   args: {
-    productName: v.string(),
+    productName: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<{
     found: boolean;
@@ -326,6 +326,9 @@ export const getProductDetails = internalAction({
       notes?: string;
     } | null;
   }> => {
+    if (!args.productName) {
+      return { found: false, product: null };
+    }
     const product = await ctx.runQuery(internal.products.getProductByName, {
       name: args.productName,
     });
@@ -355,17 +358,17 @@ export const getProductDetails = internalAction({
 // ---------------------------------------------------------------------------
 export const createProtocol = internalAction({
   args: {
-    customerName: v.string(),
+    customerName: v.optional(v.string()),
     companyName: v.optional(v.string()),
-    phone: v.string(),
+    phone: v.optional(v.string()),
     email: v.optional(v.string()),
-    product: v.string(),
-    quantity: v.string(),
-    specifications: v.string(), // JSON string of key-value spec pairs
-    artworkStatus: v.string(),
-    deliveryAddress: v.string(),
-    deliveryPostcode: v.string(),
-    requiredDeliveryDate: v.string(),
+    product: v.optional(v.string()),
+    quantity: v.optional(v.string()),
+    specifications: v.optional(v.string()), // JSON string of key-value spec pairs
+    artworkStatus: v.optional(v.string()),
+    deliveryAddress: v.optional(v.string()),
+    deliveryPostcode: v.optional(v.string()),
+    requiredDeliveryDate: v.optional(v.string()),
     additionalDetails: v.optional(v.string()),
   },
   handler: async (_ctx, args): Promise<{
@@ -393,20 +396,20 @@ export const createProtocol = internalAction({
   }> => {
     const protocol = {
       customer: {
-        full_name: args.customerName,
+        full_name: args.customerName ?? "",
         company_name: args.companyName ?? "",
-        phone: args.phone,
+        phone: args.phone ?? "",
         email: args.email ?? "",
       },
       order: {
-        product: args.product,
-        quantity: args.quantity,
-        specifications: args.specifications,
-        artwork: args.artworkStatus,
+        product: args.product ?? "",
+        quantity: args.quantity ?? "",
+        specifications: args.specifications ?? "",
+        artwork: args.artworkStatus ?? "",
         delivery: {
-          address: args.deliveryAddress,
-          postcode: args.deliveryPostcode,
-          required_delivery_date: args.requiredDeliveryDate,
+          address: args.deliveryAddress ?? "",
+          postcode: args.deliveryPostcode ?? "",
+          required_delivery_date: args.requiredDeliveryDate ?? "",
         },
         additional_details: args.additionalDetails ?? "",
       },
@@ -427,15 +430,15 @@ export const createProtocol = internalAction({
 export const storeGeneralInfo = internalAction({
   args: {
     userId: v.id("users"),
-    infoType: v.string(), // e.g. "company_name", "email", "preference"
-    value: v.string(),
+    infoType: v.optional(v.string()), // e.g. "company_name", "email", "preference"
+    value: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<{ stored: boolean }> => {
     // Store as a system message in the user's conversation for retrieval
     await ctx.runMutation(internal.products.insertInfoNote, {
       userId: args.userId,
-      infoType: args.infoType,
-      value: args.value,
+      infoType: args.infoType ?? "general",
+      value: args.value ?? "",
     });
     return { stored: true };
   },

@@ -260,16 +260,33 @@ async function processIncoming(body: any, origin: string) {
                 textToSend = parsed.message || textToSend;
 
               } else if (parsed.type === "order") {
-                const o = parsed.data?.order || {};
-                const c = parsed.data?.customer || {};
+                const c = parsed.data?.customer ?? parsed.data ?? {};
+                const o = parsed.data?.order ?? parsed.data ?? {};
+                const d = o.delivery ?? parsed.data?.delivery ?? {};
+
+                const details: string[] = [];
+                if (c.full_name || c.customer_name) details.push(`*Customer:* ${c.full_name || c.customer_name}${c.company_name ? ` (${c.company_name})` : ""}`);
+                if (c.email) details.push(`*Email:* ${c.email}`);
+                if (c.phone) details.push(`*Phone:* ${c.phone}`);
+                if (o.product) details.push(`*Product:* ${o.product}`);
+                if (o.quantity) details.push(`*Quantity:* ${o.quantity}`);
+                if (o.size) details.push(`*Size:* ${o.size}`);
+                if (o.material) details.push(`*Material:* ${o.material}`);
+                if (o.colour) details.push(`*Colour:* ${o.colour}`);
+                if (o.pages) details.push(`*Pages:* ${o.pages}`);
+                if (o.finish) details.push(`*Finish:* ${o.finish}`);
+                if (o.printing) details.push(`*Printing:* ${o.printing}`);
+                if (o.artwork) details.push(`*Artwork:* ${o.artwork}`);
+                if (d.address || o.delivery_address) details.push(`*Delivery Address:* ${d.address || o.delivery_address}`);
+                if (d.postcode || o.delivery_postcode) details.push(`*Postcode:* ${d.postcode || o.delivery_postcode}`);
+                if (d.required_delivery_date || o.required_delivery_date) details.push(`*Required Date:* ${d.required_delivery_date || o.required_delivery_date}`);
+                if (o.additional_details) details.push(`*Notes:* ${o.additional_details}`);
+
                 textToSend =
                   `✅ *Quotation Request Received*\n\n` +
-                  `${parsed.message || ""}\n\n` +
-                  `*Customer:* ${c.full_name || ""} ${c.company_name ? `(${c.company_name})` : ""}\n` +
-                  `*Product:* ${o.product || ""} — Qty: ${o.quantity || ""}\n` +
-                  `*Delivery:* ${o.delivery?.address || ""}, ${o.delivery?.postcode || ""}\n` +
-                  `*Required by:* ${o.delivery?.required_delivery_date || "TBC"}\n\n` +
-                  `Our team will be in touch shortly with a quotation. 🖨️`;
+                  `${parsed.message || "Thank you. We have all the details required. Our team will review your requirements and prepare a quotation shortly."}\n\n` +
+                  (details.length > 0 ? `${details.join("\n")}\n\n` : "") +
+                  `Our team will be in touch shortly with an official quotation. 🖨️`;
 
               } else if (parsed.type === "agent") {
                 textToSend = `🤝 ${parsed.message || "A consultant will be in touch shortly."}`;

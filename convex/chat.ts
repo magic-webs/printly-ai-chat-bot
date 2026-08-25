@@ -306,7 +306,10 @@ Every response MUST be a single valid JSON object. Choose the appropriate "type"
   • Customer Info: Name, Company (if available), Email, Phone
   • Product Details: Product, Quantity, Size/Material/Colour/Pages/Finish/Printing (all applicable)
   • Artwork Status (print-ready supplied, or Printwell to supply design)
-  • Delivery Info: Full Address, Postcode, Required Delivery Date
+  • Delivery Info: Full Address, ORDER CONFIRMATION RULE:
+When the customer confirms their enquiry details (e.g. says "Yes", "Correct", "Proceed", "Confirm", "Looks good"), you MUST immediately respond with a single valid JSON object of type "order" containing all collected details in the "data" object.
+Do NOT repeat the confirmation request.
+Do NOT output empty responses or markdown code fences. Output raw JSON only starting with { and ending with }.
 
 SCHEMA FORMATS:
 
@@ -335,75 +338,82 @@ Fill all "data" fields from the conversation, or leave as "" if unknown.`;
     ];
 
     // 8. Define AI tools for the agent (using plain objects compatible with AI SDK)
+    let executedProtocol: any = null;
+
     const agentTools = {
       getProductDetails: {
         description: "Get the required specification fields and details for a Printwell product. Call this when the customer mentions a product to know exactly what questions to ask.",
         parameters: z.object({
-          productName: z.string().describe("The name of the product, e.g. 'Business Cards', 'Brochures', 'Banners'"),
+          productName: z.string().optional().describe("The name of the product, e.g. 'Business Cards', 'Brochures', 'Banners'"),
         }),
-        execute: async ({ productName }: { productName: string }) => {
-          const result = await ctx.runAction(internal.products.getProductDetails, { productName });
+        execute: async ({ productName }: { productName?: string }) => {
+          const result = await ctx.runAction(internal.products.getProductDetails, { productName: productName || "" });
           return result;
         },
       },
       createProtocol: {
         description: "Create a structured quotation protocol once all required information has been collected from the customer. Call this before outputting a type='order' response.",
         parameters: z.object({
-          customerName: z.string().describe("Customer's full name"),
+          customerName: z.string().optional().describe("Customer's full name"),
           companyName: z.string().optional().describe("Company name if provided"),
-          phone: z.string().describe("Customer's phone number"),
+          phone: z.string().optional().describe("Customer's phone number"),
           email: z.string().optional().describe("Customer's email address if provided"),
-          product: z.string().describe("Product name e.g. Business Cards"),
-          quantity: z.string().describe("Quantity required"),
-          specifications: z.string().describe("JSON string of all product specs: size, material, colour, finish, pages, printing, embellishments etc."),
-          artworkStatus: z.string().describe("Artwork status: print-ready supplied or Printwell to create"),
-          deliveryAddress: z.string().describe("Full delivery address"),
-          deliveryPostcode: z.string().describe("Delivery postcode"),
-          requiredDeliveryDate: z.string().describe("Required delivery date"),
+          product: z.string().optional().describe("Product name e.g. Business Cards"),
+          quantity: z.string().optional().describe("Quantity required"),
+          specifications: z.string().optional().describe("JSON string of all product specs: size, material, colour, finish, pages, printing, embellishments etc."),
+          artworkStatus: z.string().optional().describe("Artwork status: print-ready supplied or Printwell to create"),
+          deliveryAddress: z.string().optional().describe("Full delivery address"),
+          deliveryPostcode: z.string().optional().describe("Delivery postcode"),
+          requiredDeliveryDate: z.string().optional().describe("Required delivery date"),
           additionalDetails: z.string().optional().describe("Any other special requirements"),
         }),
         execute: async (params: {
-          customerName: string;
+          customerName?: string;
           companyName?: string;
-          phone: string;
+          phone?: string;
           email?: string;
-          product: string;
-          quantity: string;
-          specifications: string;
-          artworkStatus: string;
-          deliveryAddress: string;
-          deliveryPostcode: string;
-          requiredDeliveryDate: string;
+          product?: string;
+          quantity?: string;
+          specifications?: string;
+          artworkStatus?: string;
+          deliveryAddress?: string;
+          deliveryPostcode?: string;
+          requiredDeliveryDate?: string;
           additionalDetails?: string;
         }) => {
           const result = await ctx.runAction(internal.products.createProtocol, {
-            customerName: params.customerName,
+            customerName: params.customerName ?? user.name ?? "",
             companyName: params.companyName,
-            phone: params.phone,
+            phone: params.phone ?? user.whatsappNumber,
             email: params.email,
-            product: params.product,
-            quantity: params.quantity,
-            specifications: params.specifications,
-            artworkStatus: params.artworkStatus,
-            deliveryAddress: params.deliveryAddress,
-            deliveryPostcode: params.deliveryPostcode,
-            requiredDeliveryDate: params.requiredDeliveryDate,
+            product: params.product ?? "",
+            quantity: params.quantity ?? "",
+            specifications: params.specifications ?? "",
+            artworkStatus: params.artworkStatus ?? "",
+            deliveryAddress: params.deliveryAddress ?? "",
+            deliveryPostcode: params.deliveryPostcode ?? "",
+            requiredDeliveryDate: params.requiredDeliveryDate ?? "",
             additionalDetails: params.additionalDetails,
           });
+
+          // Only record protocol if product AND quantity are non-empty
+          if (result?.protocol?.order?.product && result?.protocol?.order?.quantity) {
+            executedProtocol = result.protocol;
+          }
           return result;
         },
       },
       storeGeneralInfo: {
         description: "Store important customer information discovered during the conversation (e.g. company name, email address, preferences). Call this as soon as you learn useful customer details.",
         parameters: z.object({
-          infoType: z.string().describe("Type of information e.g. 'company_name', 'email', 'industry', 'preference'"),
-          value: z.string().describe("The actual value to store"),
+          infoType: z.string().optional().describe("Type of information e.g. 'company_name', 'email', 'industry', 'preference'"),
+          value: z.string().optional().describe("The actual value to store"),
         }),
-        execute: async ({ infoType, value }: { infoType: string; value: string }) => {
+        execute: async ({ infoType, value }: { infoType?: string; value?: string }) => {
           const result = await ctx.runAction(internal.products.storeGeneralInfo, {
             userId: user._id,
-            infoType,
-            value,
+            infoType: infoType || "general",
+            value: value || "",
           });
           return result;
         },
@@ -420,7 +430,19 @@ Fill all "data" fields from the conversation, or leave as "" if unknown.`;
         tools: agentTools,
         maxSteps: 5,
       } as any);
-      rawResponse = result.text.trim();
+
+      rawResponse = result.text?.trim() || "";
+
+      // Fallback: check steps if result.text is empty
+      if (!rawResponse && (result as any).steps && (result as any).steps.length > 0) {
+        for (let i = (result as any).steps.length - 1; i >= 0; i--) {
+          const stepText = (result as any).steps[i]?.text?.trim();
+          if (stepText) {
+            rawResponse = stepText;
+            break;
+          }
+        }
+      }
     } catch (err) {
       console.error("AI generation failed:", err);
       rawResponse = JSON.stringify({
@@ -429,77 +451,100 @@ Fill all "data" fields from the conversation, or leave as "" if unknown.`;
       });
     }
 
-    // 10. Parse response and trigger webhooks
-    const replies: any[] = [];
-    let parsedResponse: any = null;
+    // 10. Parse response safely (strip markdown fences, extract JSON)
+    let parsedResponse = parseAiResponse(rawResponse);
 
-    try {
-      parsedResponse = JSON.parse(rawResponse);
-      if (parsedResponse.type && parsedResponse.message) {
-        replies.push({
-          type: "text",
-          text: JSON.stringify(parsedResponse),
-        });
-      } else {
-        replies.push({
-          type: "text",
-          text: JSON.stringify({
-            type: "message",
-            message: parsedResponse.message || rawResponse,
-          }),
-        });
-      }
-    } catch {
-      replies.push({
-        type: "text",
-        text: JSON.stringify({
-          type: "message",
-          message: rawResponse || "I'm sorry, I'm having trouble processing that request.",
-        }),
-      });
+    // If createProtocol tool was executed WITH valid product and quantity, use its data to build type='order' response
+    if (
+      executedProtocol &&
+      executedProtocol.order?.product &&
+      executedProtocol.order?.quantity &&
+      (!parsedResponse || parsedResponse.type !== "order")
+    ) {
+      parsedResponse = {
+        type: "order",
+        message: "Thank you. We have all the details required. Our team will review your requirements and prepare a quotation shortly.",
+        data: {
+          customer: executedProtocol.customer,
+          order: executedProtocol.order,
+        },
+      };
     }
 
-    // 11. Trigger webhooks and persist order/agent records
+    if (!parsedResponse) {
+      if (rawResponse && rawResponse.length > 0) {
+        // Plain text returned by AI model – wrap into message response
+        parsedResponse = {
+          type: "message",
+          message: rawResponse,
+        };
+      } else {
+        // Fallback if AI produced no output
+        parsedResponse = {
+          type: "message",
+          message: "Thank you. We have received your message and will assist you shortly.",
+        };
+      }
+    }
+
+    if (!parsedResponse.type) parsedResponse.type = "message";
+    if (!parsedResponse.message) parsedResponse.message = rawResponse || "Processing your request...";
+
+    const replies = [
+      {
+        type: "text",
+        text: formatWhatsAppMessage(parsedResponse),
+      },
+    ];
+
+    // 11. Trigger webhooks and persist order/agent records ONLY if valid non-empty order details exist
     if (parsedResponse?.type === "order" && parsedResponse?.data) {
-      try {
-        const orderData = parsedResponse.data;
-        const customerData = orderData.customer ?? {};
-        const orderDetails = orderData.order ?? {};
-        const delivery = orderDetails.delivery ?? {};
+      const orderData = parsedResponse.data;
+      const customerData = orderData.customer ?? {};
+      const orderDetails = orderData.order ?? orderData;
+      const delivery = orderDetails.delivery ?? orderData.delivery ?? {};
 
-        // 11a. Persist order to DB first so we can link the webhook event ID
-        const orderId = await ctx.runMutation(internal.orders.createOrder, {
-          userId: user._id,
-          whatsappNumber: user.whatsappNumber,
-          customerName: customerData.full_name || user.name || "",
-          companyName: customerData.company_name || undefined,
-          email: customerData.email || undefined,
-          phone: customerData.phone || user.whatsappNumber,
-          product: orderDetails.product || "",
-          quantity: orderDetails.quantity || "",
-          size: orderDetails.size || undefined,
-          material: orderDetails.material || undefined,
-          colour: orderDetails.colour || undefined,
-          pages: orderDetails.pages || undefined,
-          finish: orderDetails.finish || undefined,
-          printing: orderDetails.printing || undefined,
-          artwork: orderDetails.artwork || "",
-          additionalDetails: orderDetails.additional_details || undefined,
-          deliveryAddress: delivery.address || undefined,
-          deliveryPostcode: delivery.postcode || undefined,
-          requiredDeliveryDate: delivery.required_delivery_date || undefined,
-          rawPayload: rawResponse,
-        });
+      const product = orderDetails.product || orderData.product || "";
+      const quantity = orderDetails.quantity || orderData.quantity || "";
 
-        console.log("[Order] Saved to DB:", orderId);
+      // Safeguard: refuse to create order if product or quantity is empty
+      if (product && quantity) {
+        try {
+          const orderId = await ctx.runMutation(internal.orders.createOrder, {
+            userId: user._id,
+            whatsappNumber: user.whatsappNumber,
+            customerName: customerData.full_name || orderData.customer_name || user.name || "",
+            companyName: customerData.company_name || orderData.company_name || undefined,
+            email: customerData.email || orderData.email || undefined,
+            phone: customerData.phone || orderData.phone || user.whatsappNumber,
+            product,
+            quantity,
+            size: orderDetails.size || orderData.size || undefined,
+            material: orderDetails.material || orderData.material || undefined,
+            colour: orderDetails.colour || orderData.colour || undefined,
+            pages: orderDetails.pages || orderData.pages || undefined,
+            finish: orderDetails.finish || orderData.finish || undefined,
+            printing: orderDetails.printing || orderData.printing || undefined,
+            artwork: orderDetails.artwork || orderData.artwork || "",
+            additionalDetails: orderDetails.additional_details || orderData.additional_details || undefined,
+            deliveryAddress: delivery.address || orderData.delivery_address || undefined,
+            deliveryPostcode: delivery.postcode || orderData.delivery_postcode || undefined,
+            requiredDeliveryDate: delivery.required_delivery_date || orderData.required_delivery_date || undefined,
+            rawPayload: JSON.stringify(parsedResponse),
+          });
 
-        // 11b. Fire webhook
-        await ctx.runAction(internal.webhooks.triggerWebhook, {
-          event: "order_created",
-          data: { ...parsedResponse.data, orderId },
-        });
-      } catch (orderErr) {
-        console.error("Order save / webhook failed for order_created:", orderErr);
+          console.log("[Order] Saved to DB:", orderId);
+
+          // Fire webhook
+          await ctx.runAction(internal.webhooks.triggerWebhook, {
+            event: "order_created",
+            data: { ...parsedResponse.data, orderId },
+          });
+        } catch (orderErr) {
+          console.error("Order save / webhook failed for order_created:", orderErr);
+        }
+      } else {
+        console.warn("[Order] Skipping order creation: missing product or quantity", { product, quantity });
       }
     } else if (parsedResponse?.type === "agent" && parsedResponse?.data) {
       try {
@@ -512,7 +557,6 @@ Fill all "data" fields from the conversation, or leave as "" if unknown.`;
       }
     }
 
-
     return {
       inbound: {
         kind: args.kind,
@@ -522,3 +566,80 @@ Fill all "data" fields from the conversation, or leave as "" if unknown.`;
     };
   },
 });
+
+function parseAiResponse(raw: string): any {
+  if (!raw || !raw.trim()) return null;
+  let cleaned = raw.trim();
+
+  // Strip markdown code fences like ```json ... ``` or ``` ... ```
+  if (cleaned.includes("```")) {
+    cleaned = cleaned.replace(/```(?:json)?\s*([\s\S]*?)\s*```/gi, "$1").trim();
+  }
+
+  // Attempt direct JSON parse
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // Extract JSON object {...}
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(cleaned.substring(firstBrace, lastBrace + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function formatWhatsAppMessage(parsed: any): string {
+  if (!parsed) return "Thank you for your message!";
+
+  if (parsed.type === "order" && parsed.data) {
+    const c = parsed.data.customer ?? parsed.data ?? {};
+    const o = parsed.data.order ?? parsed.data ?? {};
+    const d = o.delivery ?? parsed.data.delivery ?? {};
+
+    const details: string[] = [];
+    if (c.full_name || c.customer_name) details.push(`*Customer:* ${c.full_name || c.customer_name}${c.company_name ? ` (${c.company_name})` : ""}`);
+    if (c.email) details.push(`*Email:* ${c.email}`);
+    if (c.phone) details.push(`*Phone:* ${c.phone}`);
+    if (o.product) details.push(`*Product:* ${o.product}`);
+    if (o.quantity) details.push(`*Quantity:* ${o.quantity}`);
+    if (o.size) details.push(`*Size:* ${o.size}`);
+    if (o.material) details.push(`*Material:* ${o.material}`);
+    if (o.colour) details.push(`*Colour:* ${o.colour}`);
+    if (o.pages) details.push(`*Pages:* ${o.pages}`);
+    if (o.finish) details.push(`*Finish:* ${o.finish}`);
+    if (o.printing) details.push(`*Printing:* ${o.printing}`);
+    if (o.artwork) details.push(`*Artwork:* ${o.artwork}`);
+    if (d.address || o.delivery_address) details.push(`*Delivery Address:* ${d.address || o.delivery_address}`);
+    if (d.postcode || o.delivery_postcode) details.push(`*Postcode:* ${d.postcode || o.delivery_postcode}`);
+    if (d.required_delivery_date || o.required_delivery_date) details.push(`*Required Date:* ${d.required_delivery_date || o.required_delivery_date}`);
+    if (o.additional_details) details.push(`*Notes:* ${o.additional_details}`);
+
+    return (
+      `✅ *Quotation Request Received*\n\n` +
+      `${parsed.message || "Thank you. We have all the details required. Our team will review your requirements and prepare a quotation shortly."}\n\n` +
+      (details.length > 0 ? `${details.join("\n")}\n\n` : "") +
+      `Our team will be in touch shortly with an official quotation. 🖨️`
+    );
+  }
+
+  if (parsed.type === "agent") {
+    return `🤝 ${parsed.message || "One of our printing consultants will be in touch shortly."}`;
+  }
+
+  if (parsed.type === "support") {
+    return `🔴 ${parsed.message || "Our support team will assist you shortly."}`;
+  }
+
+  if (parsed.type === "customer") {
+    return `📦 ${parsed.message || "Our customer team will assist with your enquiry shortly."}`;
+  }
+
+  return parsed.message || JSON.stringify(parsed);
+}
+
