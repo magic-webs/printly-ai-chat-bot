@@ -14,6 +14,7 @@ import type * as debug from "../debug.js";
 import type * as documents from "../documents.js";
 import type * as ingest from "../ingest.js";
 import type * as messages from "../messages.js";
+import type * as orders from "../orders.js";
 import type * as products from "../products.js";
 import type * as r2 from "../r2.js";
 import type * as seed from "../seed.js";
@@ -34,6 +35,7 @@ declare const fullApi: ApiFromModules<{
   documents: typeof documents;
   ingest: typeof ingest;
   messages: typeof messages;
+  orders: typeof orders;
   products: typeof products;
   r2: typeof r2;
   seed: typeof seed;

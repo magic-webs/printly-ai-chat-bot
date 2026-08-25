@@ -459,15 +459,47 @@ Fill all "data" fields from the conversation, or leave as "" if unknown.`;
       });
     }
 
-    // 11. Trigger webhooks based on response type
+    // 11. Trigger webhooks and persist order/agent records
     if (parsedResponse?.type === "order" && parsedResponse?.data) {
       try {
+        const orderData = parsedResponse.data;
+        const customerData = orderData.customer ?? {};
+        const orderDetails = orderData.order ?? {};
+        const delivery = orderDetails.delivery ?? {};
+
+        // 11a. Persist order to DB first so we can link the webhook event ID
+        const orderId = await ctx.runMutation(internal.orders.createOrder, {
+          userId: user._id,
+          whatsappNumber: user.whatsappNumber,
+          customerName: customerData.full_name || user.name || "",
+          companyName: customerData.company_name || undefined,
+          email: customerData.email || undefined,
+          phone: customerData.phone || user.whatsappNumber,
+          product: orderDetails.product || "",
+          quantity: orderDetails.quantity || "",
+          size: orderDetails.size || undefined,
+          material: orderDetails.material || undefined,
+          colour: orderDetails.colour || undefined,
+          pages: orderDetails.pages || undefined,
+          finish: orderDetails.finish || undefined,
+          printing: orderDetails.printing || undefined,
+          artwork: orderDetails.artwork || "",
+          additionalDetails: orderDetails.additional_details || undefined,
+          deliveryAddress: delivery.address || undefined,
+          deliveryPostcode: delivery.postcode || undefined,
+          requiredDeliveryDate: delivery.required_delivery_date || undefined,
+          rawPayload: rawResponse,
+        });
+
+        console.log("[Order] Saved to DB:", orderId);
+
+        // 11b. Fire webhook
         await ctx.runAction(internal.webhooks.triggerWebhook, {
           event: "order_created",
-          data: parsedResponse.data,
+          data: { ...parsedResponse.data, orderId },
         });
-      } catch (webhookErr) {
-        console.error("Webhook trigger failed for order_created:", webhookErr);
+      } catch (orderErr) {
+        console.error("Order save / webhook failed for order_created:", orderErr);
       }
     } else if (parsedResponse?.type === "agent" && parsedResponse?.data) {
       try {
@@ -479,6 +511,7 @@ Fill all "data" fields from the conversation, or leave as "" if unknown.`;
         console.error("Webhook trigger failed for human_agent:", webhookErr);
       }
     }
+
 
     return {
       inbound: {
