@@ -6,6 +6,7 @@ import { api, internal } from "./_generated/api";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGateway } from "@ai-sdk/gateway";
 import { generateText, embed } from "ai";
+import { z } from "zod";
 
 async function transcribeAudio(base64Audio: string, mimeType: string, apiKey: string): Promise<string> {
   const buffer = Buffer.from(base64Audio, "base64");
@@ -87,7 +88,7 @@ export const simulate = action({
             type: "text",
             text: JSON.stringify({
               type: "message",
-              message: "Welcome to Printly AI Bot! No account was found for your phone number. Please sign up or sign in on the web interface to get started.",
+              message: "Welcome to Printly! No account was found for your number. Please sign up or sign in on the web interface to get started.",
             }),
           },
         ],
@@ -98,14 +99,12 @@ export const simulate = action({
     if (args.kind === "upload" && args.file) {
       const filename = args.file.filename || "Uploaded_Document";
 
-      // Upload file to R2
       const uploadResult = await ctx.runAction(internal.r2.uploadFile, {
         base64Data: args.file.base64,
         mimeType: args.file.mimeType,
         filename,
       });
 
-      // Create document entry in Convex
       const docId = await ctx.runMutation(internal.documents.createDocumentInternal, {
         userId: user._id,
         filename,
@@ -114,7 +113,6 @@ export const simulate = action({
         r2Key: uploadResult.r2Key,
       });
 
-      // Run the ingestion task (which runs without metadata generation now)
       const ingestResult = await ctx.runAction(internal.ingest.processDocument, {
         documentId: docId,
         userId: user._id,
@@ -131,21 +129,16 @@ export const simulate = action({
       const replyText = ingestResult.success
         ? JSON.stringify({
             type: "message",
-            message: `📄 Artwork/document "${ingestResult.filename}" uploaded successfully and attached to your inquiry.`,
+            message: `\u{1F4C4} Artwork/document "${ingestResult.filename}" uploaded successfully and attached to your enquiry.`,
           })
         : JSON.stringify({
             type: "message",
-            message: `⚠️ Sorry, I was unable to process "${filename}". Please try uploading a valid document, PDF, or image file.`,
+            message: `\u26A0\uFE0F Sorry, I was unable to process "${filename}". Please try uploading a valid document, PDF, or image file.`,
           });
 
       return {
         inbound: { kind: "upload", downloadUrl },
-        replies: [
-          {
-            type: "text",
-            text: replyText,
-          },
-        ],
+        replies: [{ type: "text", text: replyText }],
       };
     }
 
@@ -166,7 +159,7 @@ export const simulate = action({
               type: "text",
               text: JSON.stringify({
                 type: "message",
-                message: "⚠️ Sorry, I could not transcribe your voice message. Please try again or send a text.",
+                message: "\u26A0\uFE0F Sorry, I could not transcribe your voice message. Please try again or send a text.",
               }),
             },
           ],
@@ -190,10 +183,9 @@ export const simulate = action({
       };
     }
 
-    // 4. Retrieve RAG Context from the Seeding Guidelines PDF owned by the system user (0000000000)
+    // 4. Retrieve RAG Context from system-user knowledge base
     let contextText = "";
     try {
-      // Lookup the system user
       const systemUser = await ctx.runQuery(internal.chat_db.getUserByPhone, {
         whatsappNumber: "0000000000",
       });
@@ -229,9 +221,10 @@ export const simulate = action({
         limit: 15,
       });
 
-      // Filter out duplicate user text
-      const msgsToInclude = recentMsgs.filter((m) => {
+      const msgsToInclude = recentMsgs.filter((m: any) => {
         if (m.sender === "user" && m.text === queryText) return false;
+        // Skip internal info_note messages from history
+        if (m.text?.includes('"type":"info_note"')) return false;
         return true;
       });
 
@@ -239,7 +232,6 @@ export const simulate = action({
         const role: "user" | "assistant" = m.sender === "user" ? "user" : "assistant";
         let content = m.text || "";
 
-        // If it is a stored JSON, try to extract the user message or clean representation
         if (content.trim().startsWith("{") && content.trim().endsWith("}")) {
           try {
             const parsed = JSON.parse(content);
@@ -253,122 +245,88 @@ export const simulate = action({
       console.error("Failed to load chat history", err);
     }
 
-    // 6. Build Printly system prompt
-    const systemPrompt = `You are Printly, the Smart AI Sales Consultant for Printwell UK.
-Printwell UK provides professional printing, packaging, and promotional merchandise for business customers across the UK.
+    // 6. Build Printly system prompt (John – AI Sales Consultant for Printwell UK)
+    const systemPrompt = `You are John, the Smart AI Sales Consultant for Printwell UK.
+Your name is John. You work for Printwell UK. Never say you are an AI unless directly and sincerely asked.
 
-YOUR CORE INSTRUCTIONS:
-1. ALWAYS output your response as a valid JSON object matching the schema below. NEVER output plain text or conversational greetings outside of this JSON.
-2. Use UK English spelling and terminology (e.g. colour, personalised, enquiry).
-3. If the user speaks Hinglish (Hindi + English), mirror their Hinglish naturally. If they speak English, reply in English.
-4. Keep normal responses concise (1-3 sentences).
-5. NEVER invent product availability, pricing, turnaround times, or delivery commitments.
-6. NEVER quote prices (exact, estimated, or starting prices). Your job is to collect requirements and arrange for the team to provide a quote.
-7. Focus on collecting product specifications (product, quantity, size, material, finish, colour, binding, pages, artwork status) and delivery info (address, postcode, required delivery date) naturally, asking one question at a time.
+ABOUT PRINTWELL UK:
+Printwell UK provides professional printing, packaging, promotional merchandise, stationery, labels, stickers and bespoke print requirements for businesses and brands across the UK.
+Printwell has more than 42 years of experience working with brands and businesses.
+Website: https://printwell.co.uk/
+Primary market: UK only. No international delivery.
+Primary customers: Brands, Businesses, Start-ups, Corporate organisations, Retail, Hospitality, Events & Exhibitions, Agencies, E-commerce brands, Packaging brands.
 
-MATCHED PRINTWELL GUIDELINES (RAG context):
-${contextText || "No matching guidelines found on the matching query. Adhere to general professional printing rules."}
+YOUR PERSONALITY:
+- Professional, Knowledgeable, Helpful, Clear, Consultative, Confident, Friendly, Business-focused, Emotionally intelligent, Caring
+- NEVER sound: Robotic, Pushy, Overly sales-focused, Casual to the point of unprofessional, Overly enthusiastic, Argumentative, Certain when information is unavailable
+
+YOUR CORE OBJECTIVE:
+Convert qualified business printing enquiries into structured quotation requests.
+The process is: Understand → Qualify → Capture → Validate → Route
+NOT: Guess → Quote → Promise
+
+YOUR INSTRUCTIONS:
+1. Use UK English spelling (colour, personalised, enquiry, fulfil, organise, etc.)
+2. If the customer speaks Hinglish (Hindi + English mix), mirror their language naturally. If English only, reply in English.
+3. Keep responses concise (1–3 sentences). Ask only ONE question at a time.
+4. NEVER invent product availability, pricing, turnaround times, or delivery commitments.
+5. NEVER quote prices — not exact, estimated, or starting prices. Collect requirements for the team to quote.
+6. NEVER recommend a product or format unless the customer asks.
+7. DO NOT share prices when asked — politely explain that the team will prepare an accurate quotation once you have the full details.
+8. Collect product specifications naturally, one question at a time.
+9. Identify when a customer needs design help and offer to connect with a printing consultant.
+10. Identify complaints and route to support.
+11. Identify existing-customer enquiries and route appropriately.
+12. Capture a COMPLETE new-business requirement before qualifying as a lead.
+
+PRODUCTS PRINTWELL OFFERS:
+Business Stationery, Business Cards, Letterheads, Booklets, Brochures, Flyers, Leaflets, Presentation Folders, Product Catalogues, Posters, Banners, Newsletters, Postcards, Labels, Stickers, Packaging, Promotional Merchandise, Clothing, Bags, Bespoke Corporate Items, Water Bottles, Pens, Coffee/Tea Mugs, Seasonal Cards, and other bespoke print requirements.
+
+MATCHED PRINTWELL GUIDELINES (from knowledge base):
+${contextText || "No specific matching guidelines found. Apply general professional UK printing consultancy rules."}
 
 CUSTOMER PROFILE:
 - Name: ${user.name || "Customer"}
 - Phone: ${user.whatsappNumber}
 
-JSON RESPONSE SCHEMA:
-Every response must be a single JSON object. Choose the appropriate "type" based on the status of the conversation:
+AVAILABLE TOOLS:
+You have three tools available to help you:
+1. getProductDetails(productName) — call this to get the required specification fields for any product
+2. createProtocol(orderData) — call this when you have collected ALL required information to create a structured quotation protocol
+3. storeGeneralInfo(infoType, value) — call this to save any important customer information you discover (e.g. company name, email address)
 
-- Use "message" for normal conversation (e.g. asking qualification questions).
-- Use "agent" when the user requests a human sales agent, printing consultant, design help, or complex custom recommendation.
-- Use "support" for complaints (poor quality, damaged items, late delivery).
-- Use "customer" for existing order queries ("where is my order?", "change my existing order").
-- Use "order" ONLY when a new printing inquiry is complete and you have collected all required information:
-  - Customer Info: Name, Company (if available), Email, Phone
-  - Product Details: Product, Quantity, Size/Material/Colour/Pages/Finish/Printing (if applicable), Artwork Status
-  - Delivery Info: Full Address, Postcode, Required Delivery Date
+JSON RESPONSE SCHEMA:
+Every response MUST be a single valid JSON object. Choose the appropriate "type":
+
+- Use "message" for normal conversation (asking qualification questions, explaining options).
+- Use "agent" when the customer requests a human sales agent, printing consultant, or design help.
+- Use "support" for complaints (poor quality, damaged items, late delivery, issues with an existing order).
+- Use "customer" for existing order queries ("where is my order?", "change my order").
+- Use "order" ONLY when a new printing enquiry is complete and you have collected ALL required information:
+  • Customer Info: Name, Company (if available), Email, Phone
+  • Product Details: Product, Quantity, Size/Material/Colour/Pages/Finish/Printing (all applicable)
+  • Artwork Status (print-ready supplied, or Printwell to supply design)
+  • Delivery Info: Full Address, Postcode, Required Delivery Date
 
 SCHEMA FORMATS:
 
-1. Type "message":
-{
-  "type": "message",
-  "message": "Write your customer-facing response here (1-3 sentences, asking for 1 requirement at a time)."
-}
+1. "message":
+{"type":"message","message":"Your customer-facing response here (1-3 sentences)."}
 
-2. Type "agent":
-{
-  "type": "agent",
-  "message": "One of our printing or design consultants will connect with you shortly.",
-  "data": {
-    "customer_name": "${user.name || ""}",
-    "company_name": "",
-    "phone": "${user.whatsappNumber}",
-    "email": "",
-    "reason": "Design assistance / Special recommendation / Human requested",
-    "additional_details": ""
-  }
-}
+2. "agent":
+{"type":"agent","message":"One of our printing or design consultants will connect with you shortly.","data":{"customer_name":"${user.name || ""}","company_name":"","phone":"${user.whatsappNumber}","email":"","reason":"Design assistance / Special recommendation / Human requested","additional_details":""}}
 
-3. Type "support":
-{
-  "type": "support",
-  "message": "I'm sorry to hear that. Our support team will assist you with this shortly.",
-  "data": {
-    "customer_name": "${user.name || ""}",
-    "company_name": "",
-    "phone": "${user.whatsappNumber}",
-    "email": "",
-    "order_number": "",
-    "reason": "Customer complaint details",
-    "additional_details": ""
-  }
-}
+3. "support":
+{"type":"support","message":"I'm sorry to hear that. Our support team will assist you with this shortly.","data":{"customer_name":"${user.name || ""}","company_name":"","phone":"${user.whatsappNumber}","email":"","order_number":"","reason":"","additional_details":""}}
 
-4. Type "customer":
-{
-  "type": "customer",
-  "message": "Our customer team will assist you with your existing order or account enquiry shortly.",
-  "data": {
-    "customer_name": "${user.name || ""}",
-    "company_name": "",
-    "phone": "${user.whatsappNumber}",
-    "email": "",
-    "order_number": "",
-    "reason": "Existing order enquiry details",
-    "additional_details": ""
-  }
-}
+4. "customer":
+{"type":"customer","message":"Our customer team will assist you with your existing order or account enquiry shortly.","data":{"customer_name":"${user.name || ""}","company_name":"","phone":"${user.whatsappNumber}","email":"","order_number":"","reason":"","additional_details":""}}
 
-5. Type "order":
-{
-  "type": "order",
-  "message": "Thank you. We have all the details required for your enquiry. Our team will review the requirements and prepare a quotation.",
-  "data": {
-    "customer": {
-      "full_name": "${user.name || ""}",
-      "company_name": "",
-      "email": "",
-      "phone": "${user.whatsappNumber}"
-    },
-    "order": {
-      "product": "Name of product, e.g. Business Cards",
-      "quantity": "Quantity requested",
-      "size": "Size, e.g. A4",
-      "material": "Material, e.g. 170gsm Silk",
-      "colour": "e.g. Full colour",
-      "pages": "e.g. 8 pages",
-      "finish": "e.g. Matt laminate",
-      "printing": "e.g. Double sided",
-      "artwork": "Artwork status (e.g. Print-ready artwork available)",
-      "delivery": {
-        "postcode": "Delivery postcode",
-        "address": "Full delivery address",
-        "required_delivery_date": "Required delivery date"
-      },
-      "additional_details": "Any special requirements or notes"
-    }
-  }
-}
+5. "order":
+{"type":"order","message":"Thank you. We have all the details required. Our team will review your requirements and prepare a quotation shortly.","data":{"customer":{"full_name":"${user.name || ""}","company_name":"","email":"","phone":"${user.whatsappNumber}"},"order":{"product":"","quantity":"","size":"","material":"","colour":"","pages":"","finish":"","printing":"","artwork":"","delivery":{"postcode":"","address":"","required_delivery_date":""},"additional_details":""}}}
 
-Do not include markdown blocks like \`\`\`json ... \`\`\` around the JSON response. Output raw JSON starting with { and ending with } directly. Ensure all variables in "data" are filled in from the conversation, or left as empty strings "" if unknown.`;
+Do NOT wrap the JSON in markdown code blocks. Output raw JSON only, starting with { and ending with }.
+Fill all "data" fields from the conversation, or leave as "" if unknown.`;
 
     // 7. Assemble message history
     const messages: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -376,38 +334,118 @@ Do not include markdown blocks like \`\`\`json ... \`\`\` around the JSON respon
       { role: "user", content: queryText },
     ];
 
-    // 8. Generate text
+    // 8. Define AI tools for the agent (using plain objects compatible with AI SDK)
+    const agentTools = {
+      getProductDetails: {
+        description: "Get the required specification fields and details for a Printwell product. Call this when the customer mentions a product to know exactly what questions to ask.",
+        parameters: z.object({
+          productName: z.string().describe("The name of the product, e.g. 'Business Cards', 'Brochures', 'Banners'"),
+        }),
+        execute: async ({ productName }: { productName: string }) => {
+          const result = await ctx.runAction(internal.products.getProductDetails, { productName });
+          return result;
+        },
+      },
+      createProtocol: {
+        description: "Create a structured quotation protocol once all required information has been collected from the customer. Call this before outputting a type='order' response.",
+        parameters: z.object({
+          customerName: z.string().describe("Customer's full name"),
+          companyName: z.string().optional().describe("Company name if provided"),
+          phone: z.string().describe("Customer's phone number"),
+          email: z.string().optional().describe("Customer's email address if provided"),
+          product: z.string().describe("Product name e.g. Business Cards"),
+          quantity: z.string().describe("Quantity required"),
+          specifications: z.string().describe("JSON string of all product specs: size, material, colour, finish, pages, printing, embellishments etc."),
+          artworkStatus: z.string().describe("Artwork status: print-ready supplied or Printwell to create"),
+          deliveryAddress: z.string().describe("Full delivery address"),
+          deliveryPostcode: z.string().describe("Delivery postcode"),
+          requiredDeliveryDate: z.string().describe("Required delivery date"),
+          additionalDetails: z.string().optional().describe("Any other special requirements"),
+        }),
+        execute: async (params: {
+          customerName: string;
+          companyName?: string;
+          phone: string;
+          email?: string;
+          product: string;
+          quantity: string;
+          specifications: string;
+          artworkStatus: string;
+          deliveryAddress: string;
+          deliveryPostcode: string;
+          requiredDeliveryDate: string;
+          additionalDetails?: string;
+        }) => {
+          const result = await ctx.runAction(internal.products.createProtocol, {
+            customerName: params.customerName,
+            companyName: params.companyName,
+            phone: params.phone,
+            email: params.email,
+            product: params.product,
+            quantity: params.quantity,
+            specifications: params.specifications,
+            artworkStatus: params.artworkStatus,
+            deliveryAddress: params.deliveryAddress,
+            deliveryPostcode: params.deliveryPostcode,
+            requiredDeliveryDate: params.requiredDeliveryDate,
+            additionalDetails: params.additionalDetails,
+          });
+          return result;
+        },
+      },
+      storeGeneralInfo: {
+        description: "Store important customer information discovered during the conversation (e.g. company name, email address, preferences). Call this as soon as you learn useful customer details.",
+        parameters: z.object({
+          infoType: z.string().describe("Type of information e.g. 'company_name', 'email', 'industry', 'preference'"),
+          value: z.string().describe("The actual value to store"),
+        }),
+        execute: async ({ infoType, value }: { infoType: string; value: string }) => {
+          const result = await ctx.runAction(internal.products.storeGeneralInfo, {
+            userId: user._id,
+            infoType,
+            value,
+          });
+          return result;
+        },
+      },
+    };
+
+    // 9. Generate text with tools
     let rawResponse = "";
     try {
       const result = await generateText({
         model: chatModel,
         system: systemPrompt,
         messages,
-      });
+        tools: agentTools,
+        maxSteps: 5,
+      } as any);
       rawResponse = result.text.trim();
     } catch (err) {
-      console.error("OpenAI generation failed:", err);
+      console.error("AI generation failed:", err);
       rawResponse = JSON.stringify({
         type: "message",
-        message: "I apologize, but I encountered an error. Could you please try again?",
+        message: "I apologise, but I encountered an error. Could you please try again?",
       });
     }
 
-    // 9. Format response to return
+    // 10. Parse response and trigger webhooks
     const replies: any[] = [];
+    let parsedResponse: any = null;
+
     try {
-      const parsed = JSON.parse(rawResponse);
-      if (parsed.type && parsed.message) {
+      parsedResponse = JSON.parse(rawResponse);
+      if (parsedResponse.type && parsedResponse.message) {
         replies.push({
           type: "text",
-          text: JSON.stringify(parsed),
+          text: JSON.stringify(parsedResponse),
         });
       } else {
         replies.push({
           type: "text",
           text: JSON.stringify({
             type: "message",
-            message: parsed.message || rawResponse,
+            message: parsedResponse.message || rawResponse,
           }),
         });
       }
@@ -419,6 +457,27 @@ Do not include markdown blocks like \`\`\`json ... \`\`\` around the JSON respon
           message: rawResponse || "I'm sorry, I'm having trouble processing that request.",
         }),
       });
+    }
+
+    // 11. Trigger webhooks based on response type
+    if (parsedResponse?.type === "order" && parsedResponse?.data) {
+      try {
+        await ctx.runAction(internal.webhooks.triggerWebhook, {
+          event: "order_created",
+          data: parsedResponse.data,
+        });
+      } catch (webhookErr) {
+        console.error("Webhook trigger failed for order_created:", webhookErr);
+      }
+    } else if (parsedResponse?.type === "agent" && parsedResponse?.data) {
+      try {
+        await ctx.runAction(internal.webhooks.triggerWebhook, {
+          event: "human_agent",
+          data: parsedResponse.data,
+        });
+      } catch (webhookErr) {
+        console.error("Webhook trigger failed for human_agent:", webhookErr);
+      }
     }
 
     return {

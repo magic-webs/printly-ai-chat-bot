@@ -57,4 +57,25 @@ export default defineSchema({
     status: v.optional(v.union(v.literal("sending"), v.literal("sent"), v.literal("error"))),
     timestamp: v.number(),
   }).index("by_user", ["userId"]),
+
+  // Printwell product catalogue — 25 products with structured requirement fields
+  products: defineTable({
+    slug: v.string(),
+    name: v.string(),
+    category: v.string(),
+    description: v.string(),
+    requirementFields: v.array(v.string()),
+    exampleSpec: v.optional(v.string()),
+    notes: v.optional(v.string()),
+  }).index("by_slug", ["slug"]),
+
+  // Log of outgoing webhook calls (order_created, human_agent)
+  webhookEvents: defineTable({
+    event: v.string(),
+    payload: v.string(), // JSON-stringified payload
+    status: v.union(v.literal("sent"), v.literal("failed")),
+    responseStatus: v.optional(v.number()),
+    error: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index("by_event", ["event"]),
 });

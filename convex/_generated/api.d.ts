@@ -14,9 +14,12 @@ import type * as debug from "../debug.js";
 import type * as documents from "../documents.js";
 import type * as ingest from "../ingest.js";
 import type * as messages from "../messages.js";
+import type * as products from "../products.js";
 import type * as r2 from "../r2.js";
 import type * as seed from "../seed.js";
+import type * as seed_helpers from "../seed_helpers.js";
 import type * as users from "../users.js";
+import type * as webhooks from "../webhooks.js";
 
 import type {
   ApiFromModules,
@@ -31,9 +34,12 @@ declare const fullApi: ApiFromModules<{
   documents: typeof documents;
   ingest: typeof ingest;
   messages: typeof messages;
+  products: typeof products;
   r2: typeof r2;
   seed: typeof seed;
+  seed_helpers: typeof seed_helpers;
   users: typeof users;
+  webhooks: typeof webhooks;
 }>;
 
 /**
