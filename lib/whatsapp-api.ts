@@ -114,8 +114,12 @@ export async function sendWhatsAppTypingIndicator(to: string, messageId?: string
     messaging_product: "whatsapp",
     recipient_type: "individual",
     to,
+    type: "typing_indicator",
     status: "read",
     ...(messageId ? { message_id: messageId } : {}),
+    typing_indicator: {
+      type: "text",
+    },
     sender_action: {
       action: "typing_on",
     },
@@ -133,7 +137,9 @@ export async function sendWhatsAppTypingIndicator(to: string, messageId?: string
     return null;
   }
 
-  return res.json();
+  const json = await res.json();
+  console.log("[WhatsApp] Typing indicator API response:", json);
+  return json;
 }
 
 /**
