@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { convexClient } from "@/lib/convex-client";
 import { api } from "@/convex/_generated/api";
-import { sendWhatsAppText, sendWhatsAppDocument, downloadWhatsAppMedia } from "@/lib/whatsapp-api";
+import { sendWhatsAppText, sendWhatsAppDocument, downloadWhatsAppMedia, sendWhatsAppTypingIndicator } from "@/lib/whatsapp-api";
 
 // Helper: retry Convex operations if serverless socket resets occur
 async function retryConvex<T>(fn: () => Promise<T>, retries = 2): Promise<T> {
@@ -76,10 +76,16 @@ async function processIncoming(body: any, origin: string) {
 
     const incomingMsg = value.messages[0];
     const fromNumber: string = incomingMsg.from; // e.g. "918926029883"
+    const messageId: string = incomingMsg.id; // e.g. "wamid.HBgL..."
     const messageType: string = incomingMsg.type; // "text", "audio", "document", "image", etc.
 
     console.log(
-      `[WhatsApp Webhook] Incoming ${messageType} message from ${fromNumber}`
+      `[WhatsApp Webhook] Incoming ${messageType} message (${messageId}) from ${fromNumber}`
+    );
+
+    // Send typing indicator and mark as read while AI is processing
+    sendWhatsAppTypingIndicator(fromNumber, messageId).catch((err) =>
+      console.warn("[WhatsApp Webhook] Failed to send typing indicator:", err)
     );
 
     let simulateResult: any = null;

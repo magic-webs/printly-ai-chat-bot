@@ -107,6 +107,36 @@ export async function sendWhatsAppMessage(payload: Record<string, unknown>): Pro
 }
 
 /**
+ * Send typing indicator and mark message as read on WhatsApp while AI processes.
+ */
+export async function sendWhatsAppTypingIndicator(to: string, messageId?: string): Promise<any> {
+  const payload: Record<string, unknown> = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to,
+    status: "read",
+    ...(messageId ? { message_id: messageId } : {}),
+    sender_action: {
+      action: "typing_on",
+    },
+  };
+
+  const res = await fetch(getMessagesUrl(), {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    console.error("[WhatsApp] Failed to send typing indicator:", errorText);
+    return null;
+  }
+
+  return res.json();
+}
+
+/**
  * Fetch and download WhatsApp media by mediaId as base64 string.
  */
 export async function downloadWhatsAppMedia(mediaId: string): Promise<{ base64: string; mimeType: string }> {
