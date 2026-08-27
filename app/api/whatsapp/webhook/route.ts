@@ -252,75 +252,14 @@ async function processIncoming(body: any, origin: string) {
         console.error("[WhatsApp Webhook] Failed to store assistant reply:", err);
       }
 
-      // Send back via WhatsApp API
+      // Send back via WhatsApp API. chat.simulate already returns
+      // display-ready text, so nothing is reformatted here.
       try {
         if (reply.type === "text") {
-          let textToSend: string = reply.text || "";
-
-          // Parse Printly JSON responses and extract plain text for WhatsApp
-          if (textToSend.trim().startsWith('{')) {
-            try {
-              const parsed = JSON.parse(textToSend);
-
-              if (parsed.type === "message") {
-                textToSend = parsed.message || textToSend;
-
-              } else if (parsed.type === "order") {
-                const c = parsed.data?.customer ?? parsed.data ?? {};
-                const o = parsed.data?.order ?? parsed.data ?? {};
-                const d = o.delivery ?? parsed.data?.delivery ?? {};
-
-                const details: string[] = [];
-                if (c.full_name || c.customer_name) details.push(`*Customer:* ${c.full_name || c.customer_name}${c.company_name ? ` (${c.company_name})` : ""}`);
-                if (c.email) details.push(`*Email:* ${c.email}`);
-                if (c.phone) details.push(`*Phone:* ${c.phone}`);
-                if (o.product) details.push(`*Product:* ${o.product}`);
-                if (o.quantity) details.push(`*Quantity:* ${o.quantity}`);
-                if (o.size) details.push(`*Size:* ${o.size}`);
-                if (o.material) details.push(`*Material:* ${o.material}`);
-                if (o.colour) details.push(`*Colour:* ${o.colour}`);
-                if (o.pages) details.push(`*Pages:* ${o.pages}`);
-                if (o.finish) details.push(`*Finish:* ${o.finish}`);
-                if (o.printing) details.push(`*Printing:* ${o.printing}`);
-                if (o.artwork) details.push(`*Artwork:* ${o.artwork}`);
-                if (d.address || o.delivery_address) details.push(`*Delivery Address:* ${d.address || o.delivery_address}`);
-                if (d.postcode || o.delivery_postcode) details.push(`*Postcode:* ${d.postcode || o.delivery_postcode}`);
-                if (d.required_delivery_date || o.required_delivery_date) details.push(`*Required Date:* ${d.required_delivery_date || o.required_delivery_date}`);
-                if (o.additional_details) details.push(`*Notes:* ${o.additional_details}`);
-
-                textToSend =
-                  `✅ *Quotation Request Received*\n\n` +
-                  `${parsed.message || "Thank you. We have all the details required. Our team will review your requirements and prepare a quotation shortly."}\n\n` +
-                  (details.length > 0 ? `${details.join("\n")}\n\n` : "") +
-                  `Our team will be in touch shortly with an official quotation. 🖨️`;
-
-              } else if (parsed.type === "agent") {
-                textToSend = `🤝 ${parsed.message || "A consultant will be in touch shortly."}`;
-
-              } else if (parsed.type === "support") {
-                textToSend = `🔴 ${parsed.message || "Our support team will assist you shortly."}`;
-
-              } else if (parsed.type === "customer") {
-                textToSend = `📦 ${parsed.message || "Our team will assist with your order enquiry shortly."}`;
-
-              } else if (parsed.type === "document_analysis") {
-                textToSend = `📄 *Document Analyzed & Saved!*\n\n- *Filename*: ${parsed.filename || "Uploaded File"}\n- *Category*: ${parsed.category || "General"}\n- *Summary*: ${parsed.summary || ""}`;
-
-              } else if (parsed.type === "structured_details") {
-                const fieldLines = (parsed.fields || [])
-                  .map((f: { key: string; value: string }) => `- *${f.key}*: ${f.value}`)
-                  .join("\n");
-                textToSend = `*${parsed.title || "Details"}*\n\n${parsed.intro || ""}\n\n${fieldLines}\n\n${parsed.outro || ""}`;
-
-              } else if (parsed.message) {
-                textToSend = parsed.message;
-              }
-            } catch {
-              // Not valid JSON — send as-is
-            }
+          const textToSend: string = reply.text || "";
+          if (textToSend.trim()) {
+            await sendWhatsAppText(fromNumber, textToSend);
           }
-
-          await sendWhatsAppText(fromNumber, textToSend);
 
         } else if (reply.type === "document" && reply.downloadUrl) {
           await sendWhatsAppDocument(

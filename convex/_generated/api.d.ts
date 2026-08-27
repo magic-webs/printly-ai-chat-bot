@@ -8,10 +8,13 @@
  * @module
  */
 
+import type * as agent_enquiry from "../agent/enquiry.js";
+import type * as agent_prompt from "../agent/prompt.js";
 import type * as chat from "../chat.js";
 import type * as chat_db from "../chat_db.js";
 import type * as debug from "../debug.js";
 import type * as documents from "../documents.js";
+import type * as enquiries from "../enquiries.js";
 import type * as ingest from "../ingest.js";
 import type * as messages from "../messages.js";
 import type * as orders from "../orders.js";
@@ -29,10 +32,13 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  "agent/enquiry": typeof agent_enquiry;
+  "agent/prompt": typeof agent_prompt;
   chat: typeof chat;
   chat_db: typeof chat_db;
   debug: typeof debug;
   documents: typeof documents;
+  enquiries: typeof enquiries;
   ingest: typeof ingest;
   messages: typeof messages;
   orders: typeof orders;

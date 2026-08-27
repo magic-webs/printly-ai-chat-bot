@@ -3,7 +3,8 @@ import { internalQuery, internalMutation, internalAction, query } from "./_gener
 import { internal } from "./_generated/api";
 
 // ---------------------------------------------------------------------------
-// Product catalogue – all 25 Printwell products derived from Printly AI Sales.md
+// Product catalogue – all 25 Printwell products, derived from
+// `PrintWell  – Knowledge Base.md`. Keep the two in step when editing.
 // ---------------------------------------------------------------------------
 const PRINTWELL_PRODUCTS = [
   {
@@ -13,7 +14,7 @@ const PRINTWELL_PRODUCTS = [
     description: "Professional business cards for brands and businesses. Printed on high-quality card stock with optional embellishments.",
     requirementFields: ["quantity", "size", "single_or_double_sided", "material_paper", "embellishments", "artwork_status", "delivery_address", "required_delivery_date"],
     exampleSpec: "55 x 85mm, printed 4 colours on white 450gsm card, trimmed",
-    notes: "Standard size is 55 x 85mm. Ask all questions at once giving a typical example.",
+    notes: "Standard size is 55 x 85mm. Offer the example spec to help the customer picture it, but still ask one question at a time.",
   },
   {
     slug: "letterheads",
@@ -31,7 +32,7 @@ const PRINTWELL_PRODUCTS = [
     description: "High-quality printed brochures for marketing and sales. Available in various sizes, page counts, and binding options.",
     requirementFields: ["quantity", "size", "number_of_pages", "self_cover_or_separate_cover", "colour", "paper_material", "binding", "embellishments", "artwork_status", "delivery_details", "required_delivery_date"],
     exampleSpec: "28pp A4 self cover, printed 4 colour throughout on 170gsm silk, folded, stapled and trimmed",
-    notes: "Above 28pp recommend Perfect Binding ONLY. Separate cover option: cover 350gsm, inner pages 130gsm.",
+    notes: "Technical constraint: above 28pp saddle-stitching is unsuitable, perfect binding is required. State it as fact, not as a recommendation. Separate cover option: cover 350gsm, inner pages 130gsm.",
   },
   {
     slug: "flyers-leaflets",
@@ -49,7 +50,7 @@ const PRINTWELL_PRODUCTS = [
     description: "Printed booklets for guides, programmes and catalogues. Various page counts and binding options available.",
     requirementFields: ["quantity", "size", "number_of_pages", "self_cover_or_separate_cover", "paper_material", "binding", "finish", "embellishments", "artwork_status", "delivery_details", "required_delivery_date"],
     exampleSpec: "28pp A4 self cover, printed 4 colour throughout on 170gsm silk, folded, stapled and trimmed",
-    notes: "Above 28pp recommend Perfect Binding ONLY. If customer unsure about binding, ask if they'd like a printing consultant.",
+    notes: "Technical constraint: above 28pp saddle-stitching is unsuitable, perfect binding is required. State it as fact, not as a recommendation. If the customer is unsure about binding, offer a printing consultant.",
   },
   {
     slug: "product-catalogues",
@@ -58,7 +59,7 @@ const PRINTWELL_PRODUCTS = [
     description: "Professional product catalogues for retail and wholesale. Full colour throughout with flexible binding and cover options.",
     requirementFields: ["quantity", "size", "number_of_pages", "self_cover_or_separate_cover", "paper_material", "binding", "embellishments", "artwork_status", "delivery_details", "required_delivery_date"],
     exampleSpec: "28pp A4, cover 350gsm, inner pages 130gsm, all collated, folded, stapled and trimmed",
-    notes: "Above 28pp recommend Perfect Binding ONLY.",
+    notes: "Technical constraint: above 28pp saddle-stitching is unsuitable, perfect binding is required. State it as fact, not as a recommendation.",
   },
   {
     slug: "presentation-folders",
@@ -303,164 +304,5 @@ export const getProductByName = internalQuery({
         p.name.toLowerCase().includes(lower) ||
         p.slug.includes(lower.replace(/\s+/g, "-"))
     ) ?? null;
-  },
-});
-
-// ---------------------------------------------------------------------------
-// AI Tool: getProductDetails
-// Called by the agent to get structured requirement fields for a named product
-// ---------------------------------------------------------------------------
-export const getProductDetails = internalAction({
-  args: {
-    productName: v.optional(v.string()),
-  },
-  handler: async (ctx, args): Promise<{
-    found: boolean;
-    product: {
-      slug: string;
-      name: string;
-      category: string;
-      description: string;
-      requirementFields: string[];
-      exampleSpec?: string;
-      notes?: string;
-    } | null;
-  }> => {
-    if (!args.productName) {
-      return { found: false, product: null };
-    }
-    const product = await ctx.runQuery(internal.products.getProductByName, {
-      name: args.productName,
-    });
-
-    if (!product) {
-      return { found: false, product: null };
-    }
-
-    return {
-      found: true,
-      product: {
-        slug: product.slug,
-        name: product.name,
-        category: product.category,
-        description: product.description,
-        requirementFields: product.requirementFields,
-        exampleSpec: product.exampleSpec,
-        notes: product.notes,
-      },
-    };
-  },
-});
-
-// ---------------------------------------------------------------------------
-// AI Tool: createProtocol
-// Called by the agent to store a structured quotation protocol once all info collected
-// ---------------------------------------------------------------------------
-export const createProtocol = internalAction({
-  args: {
-    customerName: v.optional(v.string()),
-    companyName: v.optional(v.string()),
-    phone: v.optional(v.string()),
-    email: v.optional(v.string()),
-    product: v.optional(v.string()),
-    quantity: v.optional(v.string()),
-    specifications: v.optional(v.string()), // JSON string of key-value spec pairs
-    artworkStatus: v.optional(v.string()),
-    deliveryAddress: v.optional(v.string()),
-    deliveryPostcode: v.optional(v.string()),
-    requiredDeliveryDate: v.optional(v.string()),
-    additionalDetails: v.optional(v.string()),
-  },
-  handler: async (_ctx, args): Promise<{
-    protocol: {
-      customer: {
-        full_name: string;
-        company_name: string;
-        phone: string;
-        email: string;
-      };
-      order: {
-        product: string;
-        quantity: string;
-        specifications: string;
-        artwork: string;
-        delivery: {
-          address: string;
-          postcode: string;
-          required_delivery_date: string;
-        };
-        additional_details: string;
-      };
-      created_at: string;
-    };
-  }> => {
-    const protocol = {
-      customer: {
-        full_name: args.customerName ?? "",
-        company_name: args.companyName ?? "",
-        phone: args.phone ?? "",
-        email: args.email ?? "",
-      },
-      order: {
-        product: args.product ?? "",
-        quantity: args.quantity ?? "",
-        specifications: args.specifications ?? "",
-        artwork: args.artworkStatus ?? "",
-        delivery: {
-          address: args.deliveryAddress ?? "",
-          postcode: args.deliveryPostcode ?? "",
-          required_delivery_date: args.requiredDeliveryDate ?? "",
-        },
-        additional_details: args.additionalDetails ?? "",
-      },
-      created_at: new Date().toISOString(),
-    };
-
-    return { protocol };
-  },
-});
-
-// ---------------------------------------------------------------------------
-// AI Tool: storeGeneralInfo
-// Called by the agent to persist miscellaneous customer information snippets
-// (e.g. company name, email, preferences) discovered mid-conversation
-// This stores information by appending to the user's message log as a structured
-// system note, keeping it retrievable via chat history.
-// ---------------------------------------------------------------------------
-export const storeGeneralInfo = internalAction({
-  args: {
-    userId: v.id("users"),
-    infoType: v.optional(v.string()), // e.g. "company_name", "email", "preference"
-    value: v.optional(v.string()),
-  },
-  handler: async (ctx, args): Promise<{ stored: boolean }> => {
-    // Store as a system message in the user's conversation for retrieval
-    await ctx.runMutation(internal.products.insertInfoNote, {
-      userId: args.userId,
-      infoType: args.infoType ?? "general",
-      value: args.value ?? "",
-    });
-    return { stored: true };
-  },
-});
-
-export const insertInfoNote = internalMutation({
-  args: {
-    userId: v.id("users"),
-    infoType: v.string(),
-    value: v.string(),
-  },
-  handler: async (ctx, args) => {
-    await ctx.db.insert("messages", {
-      userId: args.userId,
-      sender: "assistant",
-      kind: "text",
-      text: JSON.stringify({
-        type: "info_note",
-        infoType: args.infoType,
-        value: args.value,
-      }),
-      timestamp: Date.now(),
-    });
   },
 });

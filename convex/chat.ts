@@ -5,10 +5,27 @@ import { v } from "convex/values";
 import { api, internal } from "./_generated/api";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGateway } from "@ai-sdk/gateway";
-import { generateText, embed } from "ai";
+import { generateText, embed, tool, stepCountIs } from "ai";
 import { z } from "zod";
+import { buildSystemPrompt } from "./agent/prompt";
+import {
+  evaluateCompleteness,
+  formatOrderConfirmation,
+  formatRoutedMessage,
+  toSnapshot,
+  type EnquirySnapshot,
+} from "./agent/enquiry";
 
-async function transcribeAudio(base64Audio: string, mimeType: string, apiKey: string): Promise<string> {
+/** Every turn is capped at this many model steps (tool call + follow-up). */
+const MAX_AGENT_STEPS = 8;
+/** Turns of prior conversation replayed as context. */
+const HISTORY_LIMIT = 15;
+
+async function transcribeAudio(
+  base64Audio: string,
+  mimeType: string,
+  apiKey: string
+): Promise<string> {
   const buffer = Buffer.from(base64Audio, "base64");
   const formData = new FormData();
 
@@ -19,9 +36,7 @@ async function transcribeAudio(base64Audio: string, mimeType: string, apiKey: st
 
   const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: { Authorization: `Bearer ${apiKey}` },
     body: formData,
   });
 
@@ -32,6 +47,14 @@ async function transcribeAudio(base64Audio: string, mimeType: string, apiKey: st
 
   const result = (await response.json()) as { text: string };
   return result.text;
+}
+
+/** Wrap a plain string as the single display-ready reply the transports expect. */
+function textReply(kind: string, text: string, extra?: Record<string, unknown>) {
+  return {
+    inbound: { kind, ...(extra ?? {}) },
+    replies: [{ type: "text", text }],
+  };
 }
 
 export const simulate = action({
@@ -60,42 +83,32 @@ export const simulate = action({
       throw new Error("Missing OPENAI_API_KEY environment variable.");
     }
 
-    const useGateway = args.aiProvider === "gateway";
     const openai = createOpenAI({ apiKey: openaiApiKey });
 
     let chatModel: any;
-    if (useGateway) {
+    if (args.aiProvider === "gateway") {
       const gatewayApiKey = process.env.AI_GATEWAY_API_KEY;
       if (!gatewayApiKey) {
         throw new Error("Missing AI_GATEWAY_API_KEY environment variable.");
       }
-      const aiGateway = createGateway({ apiKey: gatewayApiKey });
-      chatModel = aiGateway("deepseek/deepseek-v4-flash");
+      chatModel = createGateway({ apiKey: gatewayApiKey })("deepseek/deepseek-v4-flash");
     } else {
       chatModel = openai("gpt-4o-mini");
     }
 
-    // 1. Identify user
+    // ---- 1. Identify the customer ----------------------------------------
     const user = await ctx.runQuery(internal.chat_db.getUserByPhone, {
       whatsappNumber: args.whatsappNumber,
     });
 
     if (!user) {
-      return {
-        inbound: { kind: args.kind },
-        replies: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              type: "message",
-              message: "Welcome to Printly! No account was found for your number. Please sign up or sign in on the web interface to get started.",
-            }),
-          },
-        ],
-      };
+      return textReply(
+        args.kind,
+        "Welcome to Printwell! No account was found for your number. Please sign up or sign in on the web interface to get started."
+      );
     }
 
-    // 2. Handle File Ingestion Flow
+    // ---- 2. File ingestion ------------------------------------------------
     if (args.kind === "upload" && args.file) {
       const filename = args.file.filename || "Uploaded_Document";
 
@@ -123,75 +136,67 @@ export const simulate = action({
 
       const downloadUrl: string = await ctx.runAction(api.r2.getDownloadUrl, {
         r2Key: uploadResult.r2Key,
-        filename: (ingestResult.success && ingestResult.filename ? ingestResult.filename : filename),
+        filename:
+          ingestResult.success && ingestResult.filename
+            ? ingestResult.filename
+            : filename,
       });
 
-      const replyText = ingestResult.success
-        ? JSON.stringify({
-            type: "message",
-            message: `\u{1F4C4} Artwork/document "${ingestResult.filename}" uploaded successfully and attached to your enquiry.`,
-          })
-        : JSON.stringify({
-            type: "message",
-            message: `\u26A0\uFE0F Sorry, I was unable to process "${filename}". Please try uploading a valid document, PDF, or image file.`,
-          });
+      if (ingestResult.success) {
+        // Record the artwork against the open enquiry so the team receives it
+        // alongside the specification.
+        await ctx.runMutation(internal.enquiries.saveEnquiryDetails, {
+          userId: user._id,
+          whatsappNumber: user.whatsappNumber,
+          artwork: `Customer supplied file: ${ingestResult.filename}`,
+        });
+      }
 
-      return {
-        inbound: { kind: "upload", downloadUrl },
-        replies: [{ type: "text", text: replyText }],
-      };
+      return textReply(
+        "upload",
+        ingestResult.success
+          ? `\u{1F4C4} Artwork/document "${ingestResult.filename}" uploaded successfully and attached to your enquiry.`
+          : `⚠️ Sorry, I was unable to process "${filename}". Please try uploading a valid document, PDF, or image file.`,
+        { downloadUrl }
+      );
     }
 
-    // 3. Handle Voice or Text Queries
+    // ---- 3. Voice / text --------------------------------------------------
     let queryText = args.text || "";
     let transcript: string | undefined;
 
     if (args.kind === "voice" && args.audio) {
       try {
-        transcript = await transcribeAudio(args.audio.base64, args.audio.mimeType, openaiApiKey);
+        transcript = await transcribeAudio(
+          args.audio.base64,
+          args.audio.mimeType,
+          openaiApiKey
+        );
         queryText = transcript;
       } catch (err) {
         console.error("Transcription error", err);
-        return {
-          inbound: { kind: "voice" },
-          replies: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                type: "message",
-                message: "\u26A0\uFE0F Sorry, I could not transcribe your voice message. Please try again or send a text.",
-              }),
-            },
-          ],
-        };
+        return textReply(
+          "voice",
+          "⚠️ Sorry, I could not transcribe your voice message. Please try again or send a text."
+        );
       }
     }
 
     queryText = queryText.trim();
     if (!queryText) {
-      return {
-        inbound: { kind: args.kind, transcript },
-        replies: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              type: "message",
-              message: "Please send a valid message or voice note.",
-            }),
-          },
-        ],
-      };
+      return textReply(args.kind, "Please send a valid message or voice note.", {
+        transcript,
+      });
     }
 
-    // 4. Retrieve RAG Context from system-user knowledge base
+    // ---- 4. Retrieve knowledge-base context -------------------------------
     let contextText = "";
     try {
       const systemUser = await ctx.runQuery(internal.chat_db.getUserByPhone, {
         whatsappNumber: "0000000000",
       });
-      const systemUserId = systemUser?._id;
 
-      if (systemUserId) {
+      if (systemUser?._id) {
         const { embedding } = await embed({
           model: openai.embedding("text-embedding-3-small"),
           value: queryText,
@@ -200,12 +205,13 @@ export const simulate = action({
         const matches = await ctx.vectorSearch("chunks", "by_embedding", {
           vector: embedding,
           limit: 8,
-          filter: (q) => q.eq("userId", systemUserId),
+          filter: (q) => q.eq("userId", systemUser._id),
         });
 
         if (matches.length > 0) {
-          const chunkIds = matches.map((m) => m._id);
-          const results = await ctx.runQuery(internal.chat_db.getChunksWithDocs, { chunkIds });
+          const results = await ctx.runQuery(internal.chat_db.getChunksWithDocs, {
+            chunkIds: matches.map((m) => m._id),
+          });
           contextText = results.map((r: any) => r.text).join("\n\n---\n\n");
         }
       }
@@ -213,433 +219,253 @@ export const simulate = action({
       console.error("Vector search / embedding retrieval failed", err);
     }
 
-    // 5. Fetch recent chat history
+    // ---- 5. Load the open enquiry so the agent knows what it already has ---
+    let enquirySnapshot: EnquirySnapshot = {};
+    try {
+      const activeEnquiry = await ctx.runQuery(internal.enquiries.getActiveEnquiry, {
+        userId: user._id,
+      });
+      if (activeEnquiry) {
+        enquirySnapshot = toSnapshot(activeEnquiry as Record<string, unknown>);
+      }
+    } catch (err) {
+      console.error("Failed to load active enquiry", err);
+    }
+    const { missing } = evaluateCompleteness(enquirySnapshot);
+
+    // ---- 6. Conversation history -----------------------------------------
     const historyMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
     try {
       const recentMsgs = await ctx.runQuery(internal.chat_db.getRecentMessages, {
         userId: user._id,
-        limit: 15,
+        limit: HISTORY_LIMIT,
       });
 
-      const msgsToInclude = recentMsgs.filter((m: any) => {
-        if (m.sender === "user" && m.text === queryText) return false;
-        // Skip internal info_note messages from history
-        if (m.text?.includes('"type":"info_note"')) return false;
-        return true;
-      });
-
-      for (const m of msgsToInclude) {
-        const role: "user" | "assistant" = m.sender === "user" ? "user" : "assistant";
-        let content = m.text || "";
-
-        if (content.trim().startsWith("{") && content.trim().endsWith("}")) {
-          try {
-            const parsed = JSON.parse(content);
-            content = parsed.message || content;
-          } catch { /* ignore */ }
-        }
-
-        historyMessages.push({ role, content });
+      for (const m of recentMsgs) {
+        // The inbound message is appended separately below.
+        if (m.sender === "user" && m.text === queryText) continue;
+        const content = (m.text || "").trim();
+        if (!content) continue;
+        // Legacy rows written by the retired storeGeneralInfo tool. Replaying
+        // them would feed raw JSON back into the conversation.
+        if (content.includes('"type":"info_note"')) continue;
+        historyMessages.push({
+          role: m.sender === "user" ? "user" : "assistant",
+          content,
+        });
       }
     } catch (err) {
       console.error("Failed to load chat history", err);
     }
 
-    // 6. Build Printly system prompt (John – AI Sales Consultant for Printwell UK)
-    const systemPrompt = `You are John, the Smart AI Sales Consultant for Printwell UK.
-Your name is John. You work for Printwell UK. Never say you are an AI unless directly and sincerely asked.
-
-ABOUT PRINTWELL UK:
-Printwell UK provides professional printing, packaging, promotional merchandise, stationery, labels, stickers and bespoke print requirements for businesses and brands across the UK.
-Printwell has more than 42 years of experience working with brands and businesses.
-Website: https://printwell.co.uk/
-Primary market: UK only. No international delivery.
-Primary customers: Brands, Businesses, Start-ups, Corporate organisations, Retail, Hospitality, Events & Exhibitions, Agencies, E-commerce brands, Packaging brands.
-
-YOUR PERSONALITY:
-- Professional, Knowledgeable, Helpful, Clear, Consultative, Confident, Friendly, Business-focused, Emotionally intelligent, Caring
-- NEVER sound: Robotic, Pushy, Overly sales-focused, Casual to the point of unprofessional, Overly enthusiastic, Argumentative, Certain when information is unavailable
-
-YOUR CORE OBJECTIVE:
-Convert qualified business printing enquiries into structured quotation requests.
-The process is: Understand → Qualify → Capture → Validate → Route
-NOT: Guess → Quote → Promise
-
-YOUR INSTRUCTIONS:
-1. Use UK English spelling (colour, personalised, enquiry, fulfil, organise, etc.)
-2. If the customer speaks Hinglish (Hindi + English mix), mirror their language naturally. If English only, reply in English.
-3. Keep responses concise (1–3 sentences). Ask only ONE question at a time.
-4. NEVER invent product availability, pricing, turnaround times, or delivery commitments.
-5. NEVER quote prices — not exact, estimated, or starting prices. Collect requirements for the team to quote.
-6. NEVER recommend a product or format unless the customer asks.
-7. DO NOT share prices when asked — politely explain that the team will prepare an accurate quotation once you have the full details.
-8. Collect product specifications naturally, one question at a time.
-9. Identify when a customer needs design help and offer to connect with a printing consultant.
-10. Identify complaints and route to support.
-11. Identify existing-customer enquiries and route appropriately.
-12. Capture a COMPLETE new-business requirement before qualifying as a lead.
-
-PRODUCTS PRINTWELL OFFERS:
-Business Stationery, Business Cards, Letterheads, Booklets, Brochures, Flyers, Leaflets, Presentation Folders, Product Catalogues, Posters, Banners, Newsletters, Postcards, Labels, Stickers, Packaging, Promotional Merchandise, Clothing, Bags, Bespoke Corporate Items, Water Bottles, Pens, Coffee/Tea Mugs, Seasonal Cards, and other bespoke print requirements.
-
-MATCHED PRINTWELL GUIDELINES (from knowledge base):
-${contextText || "No specific matching guidelines found. Apply general professional UK printing consultancy rules."}
-
-CUSTOMER PROFILE:
-- Name: ${user.name || "Customer"}
-- Phone: ${user.whatsappNumber}
-
-AVAILABLE TOOLS:
-You have three tools available to help you:
-1. getProductDetails(productName) — call this to get the required specification fields for any product
-2. createProtocol(orderData) — call this when you have collected ALL required information to create a structured quotation protocol
-3. storeGeneralInfo(infoType, value) — call this to save any important customer information you discover (e.g. company name, email address)
-
-JSON RESPONSE SCHEMA:
-Every response MUST be a single valid JSON object. Choose the appropriate "type":
-
-- Use "message" for normal conversation (asking qualification questions, explaining options).
-- Use "agent" when the customer requests a human sales agent, printing consultant, or design help.
-- Use "support" for complaints (poor quality, damaged items, late delivery, issues with an existing order).
-- Use "customer" for existing order queries ("where is my order?", "change my order").
-- Use "order" ONLY when a new printing enquiry is complete and you have collected ALL required information:
-  • Customer Info: Name, Company (if available), Email, Phone
-  • Product Details: Product, Quantity, Size/Material/Colour/Pages/Finish/Printing (all applicable)
-  • Artwork Status (print-ready supplied, or Printwell to supply design)
-  • Delivery Info: Full Address, ORDER CONFIRMATION RULE:
-When the customer confirms their enquiry details (e.g. says "Yes", "Correct", "Proceed", "Confirm", "Looks good"), you MUST immediately respond with a single valid JSON object of type "order" containing all collected details in the "data" object.
-Do NOT repeat the confirmation request.
-Do NOT output empty responses or markdown code fences. Output raw JSON only starting with { and ending with }.
-
-SCHEMA FORMATS:
-
-1. "message":
-{"type":"message","message":"Your customer-facing response here (1-3 sentences)."}
-
-2. "agent":
-{"type":"agent","message":"One of our printing or design consultants will connect with you shortly.","data":{"customer_name":"${user.name || ""}","company_name":"","phone":"${user.whatsappNumber}","email":"","reason":"Design assistance / Special recommendation / Human requested","additional_details":""}}
-
-3. "support":
-{"type":"support","message":"I'm sorry to hear that. Our support team will assist you with this shortly.","data":{"customer_name":"${user.name || ""}","company_name":"","phone":"${user.whatsappNumber}","email":"","order_number":"","reason":"","additional_details":""}}
-
-4. "customer":
-{"type":"customer","message":"Our customer team will assist you with your existing order or account enquiry shortly.","data":{"customer_name":"${user.name || ""}","company_name":"","phone":"${user.whatsappNumber}","email":"","order_number":"","reason":"","additional_details":""}}
-
-5. "order":
-{"type":"order","message":"Thank you. We have all the details required. Our team will review your requirements and prepare a quotation shortly.","data":{"customer":{"full_name":"${user.name || ""}","company_name":"","email":"","phone":"${user.whatsappNumber}"},"order":{"product":"","quantity":"","size":"","material":"","colour":"","pages":"","finish":"","printing":"","artwork":"","delivery":{"postcode":"","address":"","required_delivery_date":""},"additional_details":""}}}
-
-Do NOT wrap the JSON in markdown code blocks. Output raw JSON only, starting with { and ending with }.
-Fill all "data" fields from the conversation, or leave as "" if unknown.`;
-
-    // 7. Assemble message history
-    const messages: Array<{ role: "user" | "assistant"; content: string }> = [
-      ...historyMessages,
-      { role: "user", content: queryText },
-    ];
-
-    // 8. Define AI tools for the agent (using plain objects compatible with AI SDK)
-    let executedProtocol: any = null;
+    // ---- 7. Tools ---------------------------------------------------------
+    // Outcomes recorded by the tools, used to shape the customer-facing reply.
+    let submission: { captured: EnquirySnapshot } | null = null;
+    let routed: { kind: "agent" | "support" | "customer" } | null = null;
 
     const agentTools = {
-      getProductDetails: {
-        description: "Get the required specification fields and details for a Printwell product. Call this when the customer mentions a product to know exactly what questions to ask.",
-        parameters: z.object({
-          productName: z.string().optional().describe("The name of the product, e.g. 'Business Cards', 'Brochures', 'Banners'"),
+      getProductDetails: tool({
+        description:
+          "Look up the specification fields Printwell needs for a product. Call this as soon as you know which product the customer wants, and let the returned fields drive your questions.",
+        inputSchema: z.object({
+          productName: z
+            .string()
+            .describe("Product name, e.g. 'Business Cards', 'Brochures', 'Banners'"),
         }),
-        execute: async ({ productName }: { productName?: string }) => {
-          const result = await ctx.runAction(internal.products.getProductDetails, { productName: productName || "" });
-          return result;
-        },
-      },
-      createProtocol: {
-        description: "Create a structured quotation protocol once all required information has been collected from the customer. Call this before outputting a type='order' response.",
-        parameters: z.object({
-          customerName: z.string().optional().describe("Customer's full name"),
-          companyName: z.string().optional().describe("Company name if provided"),
-          phone: z.string().optional().describe("Customer's phone number"),
-          email: z.string().optional().describe("Customer's email address if provided"),
-          product: z.string().optional().describe("Product name e.g. Business Cards"),
-          quantity: z.string().optional().describe("Quantity required"),
-          specifications: z.string().optional().describe("JSON string of all product specs: size, material, colour, finish, pages, printing, embellishments etc."),
-          artworkStatus: z.string().optional().describe("Artwork status: print-ready supplied or Printwell to create"),
-          deliveryAddress: z.string().optional().describe("Full delivery address"),
-          deliveryPostcode: z.string().optional().describe("Delivery postcode"),
-          requiredDeliveryDate: z.string().optional().describe("Required delivery date"),
-          additionalDetails: z.string().optional().describe("Any other special requirements"),
-        }),
-        execute: async (params: {
-          customerName?: string;
-          companyName?: string;
-          phone?: string;
-          email?: string;
-          product?: string;
-          quantity?: string;
-          specifications?: string;
-          artworkStatus?: string;
-          deliveryAddress?: string;
-          deliveryPostcode?: string;
-          requiredDeliveryDate?: string;
-          additionalDetails?: string;
-        }) => {
-          const result = await ctx.runAction(internal.products.createProtocol, {
-            customerName: params.customerName ?? user.name ?? "",
-            companyName: params.companyName,
-            phone: params.phone ?? user.whatsappNumber,
-            email: params.email,
-            product: params.product ?? "",
-            quantity: params.quantity ?? "",
-            specifications: params.specifications ?? "",
-            artworkStatus: params.artworkStatus ?? "",
-            deliveryAddress: params.deliveryAddress ?? "",
-            deliveryPostcode: params.deliveryPostcode ?? "",
-            requiredDeliveryDate: params.requiredDeliveryDate ?? "",
-            additionalDetails: params.additionalDetails,
+        execute: async ({ productName }) => {
+          const product = await ctx.runQuery(internal.products.getProductByName, {
+            name: productName,
           });
 
-          // Only record protocol if product AND quantity are non-empty
-          if (result?.protocol?.order?.product && result?.protocol?.order?.quantity) {
-            executedProtocol = result.protocol;
+          if (!product) {
+            return {
+              found: false,
+              hint: "No exact match. Ask the customer to describe what they want to print, then try again with a closer product name.",
+            };
           }
-          return result;
+
+          return {
+            found: true,
+            name: product.name,
+            slug: product.slug,
+            category: product.category,
+            requirementFields: product.requirementFields,
+            exampleSpec: product.exampleSpec,
+            notes: product.notes,
+          };
         },
-      },
-      storeGeneralInfo: {
-        description: "Store important customer information discovered during the conversation (e.g. company name, email address, preferences). Call this as soon as you learn useful customer details.",
-        parameters: z.object({
-          infoType: z.string().optional().describe("Type of information e.g. 'company_name', 'email', 'industry', 'preference'"),
-          value: z.string().optional().describe("The actual value to store"),
+      }),
+
+      saveEnquiryDetails: tool({
+        description:
+          "Save details the customer has given you. Call this every time you learn something new. Pass only the fields you actually learned — omit the rest. Returns what is still outstanding.",
+        inputSchema: z.object({
+          customerName: z.string().optional().describe("Customer's full name"),
+          companyName: z.string().optional(),
+          email: z.string().optional(),
+          phone: z.string().optional(),
+          product: z.string().optional().describe("Product name, e.g. Business Cards"),
+          productSlug: z
+            .string()
+            .optional()
+            .describe("Slug returned by getProductDetails"),
+          quantity: z.string().optional(),
+          size: z.string().optional().describe("Size or dimensions"),
+          material: z.string().optional().describe("Paper, card or material"),
+          colour: z.string().optional().describe("Colour / printing colours"),
+          pages: z.string().optional().describe("Page count for multi-page products"),
+          finish: z.string().optional().describe("Finish, binding or embellishments"),
+          printing: z.string().optional().describe("Single or double sided, print method"),
+          artwork: z
+            .string()
+            .optional()
+            .describe("Artwork status: print-ready supplied, or Printwell to design"),
+          deliveryAddress: z.string().optional(),
+          deliveryPostcode: z.string().optional(),
+          requiredDeliveryDate: z.string().optional(),
+          additionalDetails: z.string().optional(),
         }),
-        execute: async ({ infoType, value }: { infoType?: string; value?: string }) => {
-          const result = await ctx.runAction(internal.products.storeGeneralInfo, {
-            userId: user._id,
-            infoType: infoType || "general",
-            value: value || "",
-          });
-          return result;
+        execute: async (fields) => {
+          const result = await ctx.runMutation(
+            internal.enquiries.saveEnquiryDetails,
+            {
+              userId: user._id,
+              whatsappNumber: user.whatsappNumber,
+              ...fields,
+            }
+          );
+          return {
+            saved: result.saved,
+            stillRequired: result.missing,
+            readyToSubmit: result.complete,
+          };
         },
-      },
+      }),
+
+      submitQuotationRequest: tool({
+        description:
+          "Raise the structured quotation request. Only call this once every mandatory field is captured AND the customer has explicitly confirmed the summary you showed them. The server re-checks completeness and will refuse if anything is missing.",
+        inputSchema: z.object({
+          customerConfirmed: z
+            .boolean()
+            .describe("True only if the customer explicitly confirmed the summary."),
+        }),
+        execute: async ({ customerConfirmed }) => {
+          if (!customerConfirmed) {
+            return {
+              submitted: false,
+              reason:
+                "Summarise the captured requirements and ask the customer to confirm before submitting.",
+            };
+          }
+
+          const result = await ctx.runMutation(
+            internal.enquiries.submitQuotationRequest,
+            {
+              userId: user._id,
+              whatsappNumber: user.whatsappNumber,
+            }
+          );
+
+          if (!result.submitted) {
+            return {
+              submitted: false,
+              stillRequired: result.missing,
+              reason:
+                "Cannot submit yet — ask the customer for the outstanding fields listed in stillRequired.",
+            };
+          }
+
+          submission = { captured: result.captured };
+          return {
+            submitted: true,
+            note: "The customer has been sent a full confirmation summary automatically. Keep your reply brief and do not repeat the details.",
+          };
+        },
+      }),
+
+      routeToTeam: tool({
+        description:
+          "Hand the conversation to a human team. Use for consultant/design/contact requests (agent), complaints (support), or existing order and account queries (customer).",
+        inputSchema: z.object({
+          kind: z
+            .enum(["agent", "support", "customer"])
+            .describe(
+              "agent = wants a human/consultant/design help/contact details; support = complaint; customer = existing order or account query"
+            ),
+          reason: z.string().describe("Short description of what the customer needs"),
+          orderNumber: z.string().optional().describe("Order reference, if mentioned"),
+          customerName: z.string().optional(),
+          companyName: z.string().optional(),
+          email: z.string().optional(),
+          additionalDetails: z.string().optional(),
+        }),
+        execute: async (params) => {
+          await ctx.runMutation(internal.enquiries.routeToTeam, {
+            userId: user._id,
+            whatsappNumber: user.whatsappNumber,
+            ...params,
+          });
+          routed = { kind: params.kind };
+          return {
+            routed: true,
+            note: "The team has been notified. Reassure the customer briefly that someone will be in touch.",
+          };
+        },
+      }),
     };
 
-    // 9. Generate text with tools
-    let rawResponse = "";
+    // ---- 8. Generate ------------------------------------------------------
+    let assistantText = "";
     try {
       const result = await generateText({
         model: chatModel,
-        system: systemPrompt,
-        messages,
+        system: buildSystemPrompt({
+          customerName: user.name,
+          whatsappNumber: user.whatsappNumber,
+          knowledgeBaseContext: contextText,
+          enquiry: enquirySnapshot,
+          missingFields: missing,
+        }),
+        messages: [...historyMessages, { role: "user", content: queryText }],
         tools: agentTools,
-        maxSteps: 5,
-      } as any);
+        // Without this the run stops at the first tool call and returns no text.
+        stopWhen: stepCountIs(MAX_AGENT_STEPS),
+      });
 
-      rawResponse = result.text?.trim() || "";
-
-      // Fallback: check steps if result.text is empty
-      if (!rawResponse && (result as any).steps && (result as any).steps.length > 0) {
-        for (let i = (result as any).steps.length - 1; i >= 0; i--) {
-          const stepText = (result as any).steps[i]?.text?.trim();
-          if (stepText) {
-            rawResponse = stepText;
-            break;
-          }
-        }
-      }
+      assistantText = result.text?.trim() ?? "";
     } catch (err) {
       console.error("AI generation failed:", err);
-      rawResponse = JSON.stringify({
-        type: "message",
-        message: "I apologise, but I encountered an error. Could you please try again?",
-      });
+      return textReply(
+        args.kind,
+        "I do apologise — something went wrong on my side. Could you please send that again?",
+        { transcript }
+      );
     }
 
-    // 10. Parse response safely (strip markdown fences, extract JSON)
-    let parsedResponse = parseAiResponse(rawResponse);
+    // ---- 9. Shape the customer-facing reply -------------------------------
+    let displayText: string;
 
-    // If createProtocol tool was executed WITH valid product and quantity, use its data to build type='order' response
-    if (
-      executedProtocol &&
-      executedProtocol.order?.product &&
-      executedProtocol.order?.quantity &&
-      (!parsedResponse || parsedResponse.type !== "order")
-    ) {
-      parsedResponse = {
-        type: "order",
-        message: "Thank you. We have all the details required. Our team will review your requirements and prepare a quotation shortly.",
-        data: {
-          customer: executedProtocol.customer,
-          order: executedProtocol.order,
-        },
-      };
+    if (submission) {
+      displayText = formatOrderConfirmation(
+        (submission as { captured: EnquirySnapshot }).captured,
+        assistantText
+      );
+    } else if (routed) {
+      const kind = (routed as { kind: "agent" | "support" | "customer" }).kind;
+      const fallback =
+        kind === "agent"
+          ? "One of our printing consultants will be in touch with you shortly."
+          : kind === "support"
+            ? "I'm sorry about that. Our support team will pick this up and get back to you shortly."
+            : "Our customer team will look into this and come back to you shortly.";
+      displayText = formatRoutedMessage(kind, assistantText || fallback);
+    } else {
+      displayText =
+        assistantText ||
+        "Thank you for your message. Could you tell me a little more about what you're looking to print?";
     }
 
-    if (!parsedResponse) {
-      if (rawResponse && rawResponse.length > 0) {
-        // Plain text returned by AI model – wrap into message response
-        parsedResponse = {
-          type: "message",
-          message: rawResponse,
-        };
-      } else {
-        // Fallback if AI produced no output
-        parsedResponse = {
-          type: "message",
-          message: "Thank you. We have received your message and will assist you shortly.",
-        };
-      }
-    }
-
-    if (!parsedResponse.type) parsedResponse.type = "message";
-    if (!parsedResponse.message) parsedResponse.message = rawResponse || "Processing your request...";
-
-    const replies = [
-      {
-        type: "text",
-        text: formatWhatsAppMessage(parsedResponse),
-      },
-    ];
-
-    // 11. Trigger webhooks and persist order/agent records ONLY if valid non-empty order details exist
-    if (parsedResponse?.type === "order" && parsedResponse?.data) {
-      const orderData = parsedResponse.data;
-      const customerData = orderData.customer ?? {};
-      const orderDetails = orderData.order ?? orderData;
-      const delivery = orderDetails.delivery ?? orderData.delivery ?? {};
-
-      const product = orderDetails.product || orderData.product || "";
-      const quantity = orderDetails.quantity || orderData.quantity || "";
-
-      // Safeguard: refuse to create order if product or quantity is empty
-      if (product && quantity) {
-        try {
-          const orderId = await ctx.runMutation(internal.orders.createOrder, {
-            userId: user._id,
-            whatsappNumber: user.whatsappNumber,
-            customerName: customerData.full_name || orderData.customer_name || user.name || "",
-            companyName: customerData.company_name || orderData.company_name || undefined,
-            email: customerData.email || orderData.email || undefined,
-            phone: customerData.phone || orderData.phone || user.whatsappNumber,
-            product,
-            quantity,
-            size: orderDetails.size || orderData.size || undefined,
-            material: orderDetails.material || orderData.material || undefined,
-            colour: orderDetails.colour || orderData.colour || undefined,
-            pages: orderDetails.pages || orderData.pages || undefined,
-            finish: orderDetails.finish || orderData.finish || undefined,
-            printing: orderDetails.printing || orderData.printing || undefined,
-            artwork: orderDetails.artwork || orderData.artwork || "",
-            additionalDetails: orderDetails.additional_details || orderData.additional_details || undefined,
-            deliveryAddress: delivery.address || orderData.delivery_address || undefined,
-            deliveryPostcode: delivery.postcode || orderData.delivery_postcode || undefined,
-            requiredDeliveryDate: delivery.required_delivery_date || orderData.required_delivery_date || undefined,
-            rawPayload: JSON.stringify(parsedResponse),
-          });
-
-          console.log("[Order] Saved to DB:", orderId);
-
-          // Fire webhook
-          await ctx.runAction(internal.webhooks.triggerWebhook, {
-            event: "order_created",
-            data: { ...parsedResponse.data, orderId },
-          });
-        } catch (orderErr) {
-          console.error("Order save / webhook failed for order_created:", orderErr);
-        }
-      } else {
-        console.warn("[Order] Skipping order creation: missing product or quantity", { product, quantity });
-      }
-    } else if (parsedResponse?.type === "agent" && parsedResponse?.data) {
-      try {
-        await ctx.runAction(internal.webhooks.triggerWebhook, {
-          event: "human_agent",
-          data: parsedResponse.data,
-        });
-      } catch (webhookErr) {
-        console.error("Webhook trigger failed for human_agent:", webhookErr);
-      }
-    }
-
-    return {
-      inbound: {
-        kind: args.kind,
-        transcript,
-      },
-      replies,
-    };
+    return textReply(args.kind, displayText, { transcript });
   },
 });
-
-function parseAiResponse(raw: string): any {
-  if (!raw || !raw.trim()) return null;
-  let cleaned = raw.trim();
-
-  // Strip markdown code fences like ```json ... ``` or ``` ... ```
-  if (cleaned.includes("```")) {
-    cleaned = cleaned.replace(/```(?:json)?\s*([\s\S]*?)\s*```/gi, "$1").trim();
-  }
-
-  // Attempt direct JSON parse
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    // Extract JSON object {...}
-    const firstBrace = cleaned.indexOf("{");
-    const lastBrace = cleaned.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      try {
-        return JSON.parse(cleaned.substring(firstBrace, lastBrace + 1));
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
-}
-
-function formatWhatsAppMessage(parsed: any): string {
-  if (!parsed) return "Thank you for your message!";
-
-  if (parsed.type === "order" && parsed.data) {
-    const c = parsed.data.customer ?? parsed.data ?? {};
-    const o = parsed.data.order ?? parsed.data ?? {};
-    const d = o.delivery ?? parsed.data.delivery ?? {};
-
-    const details: string[] = [];
-    if (c.full_name || c.customer_name) details.push(`*Customer:* ${c.full_name || c.customer_name}${c.company_name ? ` (${c.company_name})` : ""}`);
-    if (c.email) details.push(`*Email:* ${c.email}`);
-    if (c.phone) details.push(`*Phone:* ${c.phone}`);
-    if (o.product) details.push(`*Product:* ${o.product}`);
-    if (o.quantity) details.push(`*Quantity:* ${o.quantity}`);
-    if (o.size) details.push(`*Size:* ${o.size}`);
-    if (o.material) details.push(`*Material:* ${o.material}`);
-    if (o.colour) details.push(`*Colour:* ${o.colour}`);
-    if (o.pages) details.push(`*Pages:* ${o.pages}`);
-    if (o.finish) details.push(`*Finish:* ${o.finish}`);
-    if (o.printing) details.push(`*Printing:* ${o.printing}`);
-    if (o.artwork) details.push(`*Artwork:* ${o.artwork}`);
-    if (d.address || o.delivery_address) details.push(`*Delivery Address:* ${d.address || o.delivery_address}`);
-    if (d.postcode || o.delivery_postcode) details.push(`*Postcode:* ${d.postcode || o.delivery_postcode}`);
-    if (d.required_delivery_date || o.required_delivery_date) details.push(`*Required Date:* ${d.required_delivery_date || o.required_delivery_date}`);
-    if (o.additional_details) details.push(`*Notes:* ${o.additional_details}`);
-
-    return (
-      `✅ *Quotation Request Received*\n\n` +
-      `${parsed.message || "Thank you. We have all the details required. Our team will review your requirements and prepare a quotation shortly."}\n\n` +
-      (details.length > 0 ? `${details.join("\n")}\n\n` : "") +
-      `Our team will be in touch shortly with an official quotation. 🖨️`
-    );
-  }
-
-  if (parsed.type === "agent") {
-    return `🤝 ${parsed.message || "One of our printing consultants will be in touch shortly."}`;
-  }
-
-  if (parsed.type === "support") {
-    return `🔴 ${parsed.message || "Our support team will assist you shortly."}`;
-  }
-
-  if (parsed.type === "customer") {
-    return `📦 ${parsed.message || "Our customer team will assist with your enquiry shortly."}`;
-  }
-
-  return parsed.message || JSON.stringify(parsed);
-}
-

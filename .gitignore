@@ -49,9 +49,10 @@ next-env.d.ts
 # convex/_generated/
 
 # AI agent skill directories (Antigravity / Claude / agent skills)
+# Anchored to the repo root so application code such as convex/agent/ is tracked.
 .agents/
 .claude/
-agent/
+/agent/
 skills-lock.json
 
 # Seed scripts that contain hardcoded credentials

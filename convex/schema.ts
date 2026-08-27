@@ -69,15 +69,67 @@ export default defineSchema({
     notes: v.optional(v.string()),
   }).index("by_slug", ["slug"]),
 
-  // Log of outgoing webhook calls (order_created, human_agent)
+  // Log of outgoing webhook calls (order_created, human_agent, support_request,
+  // customer_enquiry). One row per delivery attempt series.
   webhookEvents: defineTable({
     event: v.string(),
     payload: v.string(), // JSON-stringified payload
-    status: v.union(v.literal("sent"), v.literal("failed")),
+    status: v.union(v.literal("pending"), v.literal("sent"), v.literal("failed")),
     responseStatus: v.optional(v.number()),
     error: v.optional(v.string()),
+    attempts: v.optional(v.number()),      // how many HTTP attempts were made
+    orderId: v.optional(v.id("orders")),   // set for order_created events
     createdAt: v.number(),
-  }).index("by_event", ["event"]),
+    deliveredAt: v.optional(v.number()),
+  })
+    .index("by_event", ["event"])
+    .index("by_order", ["orderId"])
+    .index("by_status", ["status"]),
+
+  // In-progress enquiry state. The agent writes captured requirement fields here
+  // turn by turn via the saveEnquiryDetails tool, so a specification survives
+  // even if the model does not repeat it in a later message. The completeness
+  // gate (KB section 30) is evaluated against THIS record, not against whatever
+  // the model happens to echo back.
+  enquiries: defineTable({
+    userId: v.id("users"),
+    whatsappNumber: v.string(),
+    status: v.union(
+      v.literal("collecting"), // actively being qualified
+      v.literal("submitted"),  // converted into an order
+      v.literal("abandoned")
+    ),
+
+    // Customer info
+    customerName: v.optional(v.string()),
+    companyName: v.optional(v.string()),
+    email: v.optional(v.string()),
+    phone: v.optional(v.string()),
+
+    // Product / specification
+    product: v.optional(v.string()),
+    productSlug: v.optional(v.string()),
+    quantity: v.optional(v.string()),
+    size: v.optional(v.string()),
+    material: v.optional(v.string()),
+    colour: v.optional(v.string()),
+    pages: v.optional(v.string()),
+    finish: v.optional(v.string()),
+    printing: v.optional(v.string()),
+    artwork: v.optional(v.string()),
+    additionalDetails: v.optional(v.string()),
+
+    // Delivery
+    deliveryAddress: v.optional(v.string()),
+    deliveryPostcode: v.optional(v.string()),
+    requiredDeliveryDate: v.optional(v.string()),
+
+    orderId: v.optional(v.id("orders")), // set once submitted
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user_and_status", ["userId", "status"])
+    .index("by_user", ["userId"]),
 
   // Orders — stored whenever the AI collects a complete printing enquiry (type: "order")
   orders: defineTable({
@@ -91,6 +143,7 @@ export default defineSchema({
 
     // Product / order details
     product: v.string(),
+    productSlug: v.optional(v.string()),
     quantity: v.string(),
     size: v.optional(v.string()),
     material: v.optional(v.string()),
@@ -117,12 +170,14 @@ export default defineSchema({
     ),
 
     // Traceability
+    enquiryId: v.optional(v.id("enquiries")),          // enquiry this was captured from
     webhookEventId: v.optional(v.id("webhookEvents")), // linked webhook log row
-    rawPayload: v.optional(v.string()),                 // original AI JSON for reference
+    rawPayload: v.optional(v.string()),                 // captured enquiry snapshot
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_whatsappNumber", ["whatsappNumber"])
     .index("by_status", ["status"])
-    .index("by_user", ["userId"]),
+    .index("by_user", ["userId"])
+    .index("by_enquiry", ["enquiryId"]),
 });

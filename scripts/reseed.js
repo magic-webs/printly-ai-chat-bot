@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * reseed.js – Run this script locally to reseed the Printly knowledge base
- * from the Printly - AI Sales.md file.
+ * reseed.js – Reseed the Printwell knowledge base from
+ * `PrintWell  – Knowledge Base.md`.
  *
  * Usage:
  *   node scripts/reseed.js
@@ -22,15 +22,16 @@ if (!CONVEX_URL) {
   process.exit(1);
 }
 
-// Read the markdown file (filename uses en dash –, not a regular hyphen)
-const mdPath = path.join(__dirname, "../Printly – AI Sales.md");
+// Filename contains a double space and an en dash –, not a regular hyphen.
+const KNOWLEDGE_BASE_FILE = "PrintWell  – Knowledge Base.md";
+const mdPath = path.join(__dirname, "..", KNOWLEDGE_BASE_FILE);
 if (!fs.existsSync(mdPath)) {
-  console.error("\u274C Printly \u2013 AI Sales.md not found at:", mdPath);
+  console.error(`❌ ${KNOWLEDGE_BASE_FILE} not found at:`, mdPath);
   process.exit(1);
 }
 
 const markdownContent = fs.readFileSync(mdPath, "utf-8").trim();
-console.log(`\u2705 Read ${markdownContent.length} characters from Printly \u2013 AI Sales.md`);
+console.log(`✅ Read ${markdownContent.length} characters from ${KNOWLEDGE_BASE_FILE}`);
 
 async function main() {
   const client = new ConvexHttpClient(CONVEX_URL);

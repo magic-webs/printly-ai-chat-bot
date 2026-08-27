@@ -8,15 +8,16 @@ export const getRecentMessages = internalQuery({
   },
   handler: async (ctx, args) => {
     const limit = args.limit ?? 20;
-    // Fetch all messages for the user and take the last `limit` by timestamp
-    const allMessages = await ctx.db
+    // Read only the newest `limit` rows. Collecting the whole history and
+    // slicing grew unbounded with conversation length.
+    const recent = await ctx.db
       .query("messages")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
-      .collect();
+      .order("desc")
+      .take(limit);
 
-    // Sort ascending by timestamp then take the last `limit`
-    const sorted = allMessages.sort((a, b) => a.timestamp - b.timestamp);
-    return sorted.slice(-limit);
+    // The index yields newest-first; the model expects chronological order.
+    return recent.reverse();
   },
 });
 

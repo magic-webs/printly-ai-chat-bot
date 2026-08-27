@@ -23,7 +23,7 @@ function chunkText(text: string, chunkSize = 1000, overlap = 200): string[] {
 
 // ---------------------------------------------------------------------------
 // reseedKnowledgeBase – wipes old system-user embeddings and re-seeds from
-// the Printly \u2013 AI Sales.md markdown file (authoritative source of truth).
+// `PrintWell  – Knowledge Base.md` (the authoritative source of truth).
 // Run this after updating the markdown to refresh the vector knowledge base.
 // ---------------------------------------------------------------------------
 export const reseedKnowledgeBase = action({
@@ -68,9 +68,11 @@ export const reseedKnowledgeBase = action({
 
     if (!markdownContent) {
       // Try to read from disk (works in local Node.js context)
+      // The knowledge base filename contains an en dash and a double space.
+      const KNOWLEDGE_BASE_FILE = "PrintWell  – Knowledge Base.md";
       const possiblePaths = [
-        "Printly - AI Sales.md",
-        path.join(process.cwd(), "Printly - AI Sales.md"),
+        KNOWLEDGE_BASE_FILE,
+        path.join(process.cwd(), KNOWLEDGE_BASE_FILE),
       ];
 
       for (const p of possiblePaths) {
@@ -84,7 +86,7 @@ export const reseedKnowledgeBase = action({
 
     if (!markdownContent) {
       throw new Error(
-        "No markdown content provided and Printly - AI Sales.md not found on disk. Pass the file content via the markdownContent argument."
+        "No markdown content provided and the knowledge base markdown was not found on disk. Pass the file content via the markdownContent argument."
       );
     }
 
@@ -103,7 +105,7 @@ export const reseedKnowledgeBase = action({
     // 5. Create document record
     const documentId = await ctx.runMutation(internal.documents.createDocumentInternal, {
       userId: systemUserId,
-      filename: "Printly - AI Sales.md",
+      filename: "PrintWell – Knowledge Base.md",
       mimeType: "text/markdown",
       size: Buffer.byteLength(markdownContent, "utf-8"),
       r2Key: "system-seeded-knowledge-base-md",
@@ -124,11 +126,11 @@ export const reseedKnowledgeBase = action({
     // 7. Update document status
     await ctx.runMutation(internal.documents.updateDocumentDetails, {
       documentId,
-      title: "Printly AI Sales Guidelines",
-      filename: "Printly - AI Sales.md",
+      title: "Printwell UK AI Sales Knowledge Base",
+      filename: "PrintWell – Knowledge Base.md",
       category: "Guidelines",
-      summary: "Master prompt, product requirements, and rules for Printly, the AI Sales Consultant.",
-      tags: ["printly", "guidelines", "rules", "products"],
+      summary: "Persona, conversation rules, product requirements, routing map and FAQs for John, the Printwell UK AI sales consultant.",
+      tags: ["printwell", "guidelines", "rules", "products", "faq"],
       status: "ready",
     });
 
@@ -136,10 +138,10 @@ export const reseedKnowledgeBase = action({
     const productResult: { inserted: number; total: number } = await ctx.runMutation(internal.products.seedProducts);
     console.log(`Products seeded: ${productResult.inserted} new, ${productResult.total} total.`);
 
-    console.log("Reseed complete. Fresh embeddings loaded from Printly \u2013 AI Sales.md.");
+    console.log("Reseed complete. Fresh embeddings loaded from the Printwell knowledge base.");
     return {
       success: true,
-      message: `Reseed complete. ${chunks.length} chunks embedded from Printly - AI Sales.md. Products: ${productResult.inserted} new inserted.`,
+      message: `Reseed complete. ${chunks.length} chunks embedded from the Printwell knowledge base. Products: ${productResult.inserted} new inserted.`,
       chunks: chunks.length,
       productsInserted: productResult.inserted,
     };
