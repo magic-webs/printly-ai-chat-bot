@@ -20,6 +20,8 @@ export interface PromptContext {
   enquiry?: EnquirySnapshot;
   /** Mandatory fields still outstanding, from the completeness gate. */
   missingFields?: string[];
+  /** Today's date as ISO yyyy-mm-dd, so relative dates resolve to the right year. */
+  today?: string;
 }
 
 /** Render the fields captured so far so the agent never re-asks a known answer. */
@@ -95,6 +97,9 @@ Use your tools to do the actual work:
   - kind "support" — a complaint: poor quality, damage, late delivery, a problem with an existing order.
   - kind "customer" — an existing order or account query, e.g. "where is my order?", "can I change my order?".
   Capture whatever details you have (order number, reason) so the team can pick it up.
+
+## DATES
+Today is ${ctx.today ?? "unknown"}. Resolve every relative or partial date the customer gives you against today's date, and always save it as ISO yyyy-mm-dd. "15th September" means the NEXT 15 September on or after today — never a past year. "Next Friday", "end of the month" and "in three weeks" resolve the same way. If a date is genuinely ambiguous, ask rather than guess.
 
 ## CAPTURING THE ENQUIRY
 Mandatory before a quotation request can be submitted:

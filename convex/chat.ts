@@ -426,6 +426,8 @@ export const simulate = action({
           knowledgeBaseContext: contextText,
           enquiry: enquirySnapshot,
           missingFields: missing,
+          // Without this the model resolves "15th September" to a past year.
+          today: new Date().toISOString().slice(0, 10),
         }),
         messages: [...historyMessages, { role: "user", content: queryText }],
         tools: agentTools,
