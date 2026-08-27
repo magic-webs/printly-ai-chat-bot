@@ -160,6 +160,132 @@ export function evaluateCompleteness(enquiry: EnquirySnapshot): CompletenessResu
 }
 
 // ---------------------------------------------------------------------------
+// Next-question planning
+// ---------------------------------------------------------------------------
+
+/**
+ * The single question to put to the customer next.
+ *
+ * Deciding this server-side is deliberate: left to its own judgement the model
+ * mirrors the bullet lists in the knowledge base and dumps every outstanding
+ * field at once, which reads nothing like a consultant.
+ */
+export interface NextQuestion {
+  field: keyof EnquirySnapshot;
+  question: string;
+}
+
+/** Natural conversational order: what → how many → how it looks → logistics. */
+const QUESTION_PLAN: Array<{
+  field: keyof EnquirySnapshot;
+  question: string;
+  /** Spec fields are only asked when the chosen product actually needs them. */
+  spec?: boolean;
+}> = [
+  { field: "product", question: "What would you like printed?" },
+  { field: "quantity", question: "How many do you need?" },
+  { field: "size", question: "What size do you need?", spec: true },
+  { field: "pages", question: "How many pages will it be?", spec: true },
+  { field: "material", question: "What paper or material would you like?", spec: true },
+  {
+    field: "printing",
+    question: "Would you like it printed on one side or both?",
+    spec: true,
+  },
+  { field: "colour", question: "How many colours should it print in?", spec: true },
+  {
+    field: "finish",
+    question: "Any finishing — lamination, binding, folding or embellishments?",
+    spec: true,
+  },
+  {
+    field: "artwork",
+    question:
+      "Will you supply print-ready artwork, or would you like Printwell to design it?",
+  },
+  { field: "deliveryPostcode", question: "What's the delivery postcode?" },
+  { field: "requiredDeliveryDate", question: "When do you need them by?" },
+  { field: "customerName", question: "Could I take your name for the quotation?" },
+];
+
+/**
+ * Map a product's `requirementFields` tokens onto enquiry keys, so only the
+ * specs that matter for the chosen product get asked.
+ */
+const REQUIREMENT_TOKEN_TO_FIELD: Record<string, keyof EnquirySnapshot> = {
+  quantity: "quantity",
+  size: "size",
+  dimensions: "size",
+  size_or_dimensions: "size",
+  approximate_dimensions: "size",
+  number_of_pages: "pages",
+  material: "material",
+  paper_material: "material",
+  material_paper: "material",
+  colour: "colour",
+  number_of_colours: "colour",
+  single_or_double_sided: "printing",
+  printing: "printing",
+  branding_method: "printing",
+  finish: "finish",
+  embellishments: "finish",
+  binding: "finish",
+  fold_type: "finish",
+  eyelets: "finish",
+  pocket_type: "finish",
+  reels_or_sheets: "finish",
+  removable_or_permanent_adhesive: "finish",
+  artwork_status: "artwork",
+  artwork: "artwork",
+};
+
+/**
+ * Pick the next outstanding field to ask about, or null when everything the
+ * product needs has been captured and the enquiry is ready to confirm.
+ *
+ * `productRequirementFields` comes from the products table; when it is absent
+ * (no product chosen yet) only the non-spec questions are considered.
+ */
+export function nextQuestion(
+  enquiry: EnquirySnapshot,
+  productRequirementFields?: string[]
+): NextQuestion | null {
+  const relevantSpecs = new Set<keyof EnquirySnapshot>();
+  for (const token of productRequirementFields ?? []) {
+    const field = REQUIREMENT_TOKEN_TO_FIELD[token];
+    if (field) relevantSpecs.add(field);
+  }
+
+  // A product with no resolvable requirement fields must not cause every
+  // specification question to be skipped — fall back to the specs that apply
+  // to virtually all printed work.
+  if (relevantSpecs.size === 0 && normaliseField(enquiry.product)) {
+    relevantSpecs.add("size");
+    relevantSpecs.add("material");
+    relevantSpecs.add("printing");
+  }
+
+  for (const step of QUESTION_PLAN) {
+    if (normaliseField(enquiry[step.field])) continue;
+
+    // Delivery is satisfied by either a postcode or a full address.
+    if (
+      step.field === "deliveryPostcode" &&
+      normaliseField(enquiry.deliveryAddress)
+    ) {
+      continue;
+    }
+
+    // Skip specs this product does not call for.
+    if (step.spec && !relevantSpecs.has(step.field)) continue;
+
+    return { field: step.field, question: step.question };
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // WhatsApp message formatting
 // ---------------------------------------------------------------------------
 

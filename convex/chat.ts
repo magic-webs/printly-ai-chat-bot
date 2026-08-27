@@ -12,6 +12,7 @@ import {
   evaluateCompleteness,
   formatOrderConfirmation,
   formatRoutedMessage,
+  nextQuestion,
   toSnapshot,
   type EnquirySnapshot,
 } from "./agent/enquiry";
@@ -233,6 +234,17 @@ export const simulate = action({
     }
     const { missing } = evaluateCompleteness(enquirySnapshot);
 
+    // Load the chosen product's requirement fields so the next question only
+    // covers specs that actually apply to it.
+    let productRequirementFields: string[] | undefined;
+    if (enquirySnapshot.productSlug) {
+      const product = await ctx.runQuery(internal.products.getProductBySlug, {
+        slug: enquirySnapshot.productSlug,
+      });
+      productRequirementFields = product?.requirementFields;
+    }
+    const plannedQuestion = nextQuestion(enquirySnapshot, productRequirementFields);
+
     // ---- 6. Conversation history -----------------------------------------
     const historyMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
     try {
@@ -284,14 +296,21 @@ export const simulate = action({
             };
           }
 
+          const planned = nextQuestion(enquirySnapshot, product.requirementFields);
+
           return {
             found: true,
             name: product.name,
             slug: product.slug,
             category: product.category,
-            requirementFields: product.requirementFields,
+            // Internal checklist — this drives the order of questions over the
+            // whole conversation. Never read it out to the customer.
+            requirementFieldsForYourReferenceOnly: product.requirementFields,
             exampleSpec: product.exampleSpec,
             notes: product.notes,
+            askNext: planned?.question ?? null,
+            instruction:
+              "Save the product with saveEnquiryDetails (include slug), then ask ONLY the askNext question. Do not list the requirement fields to the customer.",
           };
         },
       }),
@@ -336,8 +355,11 @@ export const simulate = action({
           );
           return {
             saved: result.saved,
-            stillRequired: result.missing,
             readyToSubmit: result.complete,
+            askNext: result.nextQuestion?.question ?? null,
+            instruction: result.complete
+              ? "Everything is captured. Summarise the requirements and ask the customer to confirm."
+              : "Ask ONLY the askNext question. Do not mention any other outstanding field.",
           };
         },
       }),
@@ -428,6 +450,7 @@ export const simulate = action({
           missingFields: missing,
           // Without this the model resolves "15th September" to a past year.
           today: new Date().toISOString().slice(0, 10),
+          nextQuestion: plannedQuestion,
         }),
         messages: [...historyMessages, { role: "user", content: queryText }],
         tools: agentTools,

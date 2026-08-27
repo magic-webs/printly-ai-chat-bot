@@ -9,6 +9,7 @@ import { Doc, Id } from "./_generated/dataModel";
 import {
   ENQUIRY_FIELD_KEYS,
   evaluateCompleteness,
+  nextQuestion,
   normaliseField,
   toSnapshot,
   type EnquirySnapshot,
@@ -38,6 +39,33 @@ const enquiryFieldArgs = {
   deliveryPostcode: v.optional(v.string()),
   requiredDeliveryDate: v.optional(v.string()),
 };
+
+/**
+ * Match a free-text product name to a catalogue slug.
+ *
+ * The agent is told to pass the slug from getProductDetails, but it frequently
+ * does not. Without a slug the question planner has no requirement fields and
+ * silently skips every specification question, so the slug is resolved here
+ * rather than left to the model.
+ */
+async function resolveProductSlug(
+  ctx: MutationCtx,
+  productName: string
+): Promise<string | undefined> {
+  const all = await ctx.db.query("products").collect();
+  const lower = productName.toLowerCase().trim();
+  const slugified = lower.replace(/\s+/g, "-");
+
+  const match =
+    all.find((p) => p.name.toLowerCase() === lower) ??
+    all.find((p) => p.slug === slugified) ??
+    all.find(
+      (p) => p.name.toLowerCase().includes(lower) || p.slug.includes(slugified)
+    ) ??
+    all.find((p) => lower.includes(p.name.toLowerCase()));
+
+  return match?.slug;
+}
 
 /**
  * Collect the requirement fields carrying a real value. A blank or placeholder
@@ -117,6 +145,12 @@ export const saveEnquiryDetails = internalMutation({
 
     const patch = buildPatch(args);
 
+    // Backfill the slug whenever a product name lands without one.
+    if (patch.product && !patch.productSlug && !enquiry.productSlug) {
+      const slug = await resolveProductSlug(ctx, patch.product);
+      if (slug) patch.productSlug = slug;
+    }
+
     if (Object.keys(patch).length > 0) {
       await ctx.db.patch(enquiry._id, { ...patch, updatedAt: Date.now() });
     }
@@ -125,11 +159,22 @@ export const saveEnquiryDetails = internalMutation({
     const snapshot = toSnapshot(updated);
     const { complete, missing } = evaluateCompleteness(snapshot);
 
+    // Only ask about specs the chosen product actually calls for.
+    let requirementFields: string[] | undefined;
+    if (snapshot.productSlug) {
+      const product = await ctx.db
+        .query("products")
+        .withIndex("by_slug", (q) => q.eq("slug", snapshot.productSlug!))
+        .unique();
+      requirementFields = product?.requirementFields;
+    }
+
     return {
       saved: Object.keys(patch),
       captured: snapshot,
       complete,
       missing,
+      nextQuestion: nextQuestion(snapshot, requirementFields),
     };
   },
 });
